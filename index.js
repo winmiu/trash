@@ -2,7 +2,7 @@ import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD1
 import { beginRun, assessmentText, resultText, errorText, RefereeStopped } from './run-log.js';
 import { requestReferee } from './referee-request.js';
 /**
- * Fair Dice v1.4.2 — independent SillyTavern UI extension with optional GM adjudication.
+ * Fair Dice v1.5.0 — independent SillyTavern UI extension with optional GM adjudication.
  * Native ST prompt interceptor, no remote calls and no character-card mutation.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
@@ -77,6 +77,7 @@ const DEFAULTS = {
     customProfile: null,
     fairness: true,
     autoJudge: true, // Recommended: independent referee classifies before rolling; extra model call when enabled for the chat.
+    compactJudge: true,
     eventDice: true,
     npcDice: true,
     actionDice: true,
@@ -412,7 +413,7 @@ async function assessScene(cfg, key, round, log, automatic) {
     refereeBusy = true;
     const isCurrent = () => extensionActive && key === chatKey() && round === roundKey() && (!automatic || (cfg.autoJudge && isEnabledHere()));
     let result;
-    try { result = await requestReferee(context(), JUDGE_PROMPT, { log, readAssessment, isCurrent }); }
+    try { result = await requestReferee(context(), JUDGE_PROMPT, { log, readAssessment, isCurrent, compact:cfg.compactJudge }); }
     finally { refereeBusy = false; }
     if (!result || !isCurrent()) return null;
     cfg.assessments[key] = result;
@@ -778,7 +779,7 @@ function updateScope() {
     const evaluated=cfg.assessments?.[key];
     const assessmentLabel=root.querySelector('#fd-assessment');
     if(assessmentLabel) assessmentLabel.textContent=evaluated?.round===roundKey() ? (evaluated.error ? '裁判评估失败：'+evaluated.error : assessmentText(evaluated)) : '本轮尚未评估。未定等级允许依据可靠事实估算，证据不足时暂缓硬判。';
-    for (const id of ['fairness', 'autoJudge', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
+    for (const id of ['fairness', 'autoJudge', 'compactJudge', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
         const inp = root.querySelector(`#fd-${id}`);
         if (inp) inp.checked = Boolean(cfg[id]);
     }
@@ -805,6 +806,7 @@ function changeSetting(key, bool) {
     const cfg = initSettings();
     if (!cfg) return;
     cfg[key] = Boolean(bool);
+    if (key === 'compactJudge') { persist(); return; }
     invalidateRoll(cfg);
     if (key === 'autoJudge') { const chat = chatKey(); if (chat) delete cfg.assessments[chat]; }
     if (!cfg.fairness && !cfg.eventDice && !cfg.npcDice && !cfg.actionDice && !cfg.combatDice) clearInjection();
@@ -842,7 +844,7 @@ function buildUI() {
     root = el('section', 'fd-root'); root.id = 'fair-dice-root';
     root.innerHTML = `
       <details class="fd-shell">
-        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.4.2</small></span><span class="fd-fold">⌄</span></summary>
+        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.5.0</small></span><span class="fd-fold">⌄</span></summary>
         <div class="fd-content">
           <div class="fd-intro">独立作用于<strong>当前聊天</strong>，不改角色卡／世界书／MVU。可选前置AI裁判：先给出简短裁定→程序掷骰→主模型叙事。</div>
           <div class="fd-onbar"><div><b>当前聊天启用</b><div id="fd-scope" class="fd-sub">尚未选择聊天</div></div><label class="fd-switch"><input id="fd-enabled" type="checkbox" /><span></span></label></div>
@@ -850,6 +852,7 @@ function buildUI() {
           <div class="fd-options">
             <label><input id="fd-fairness" type="checkbox" /> 公平判定：不无理由偏袒玩家</label>
             <label><input id="fd-autoJudge" type="checkbox" /> 前置 AI 裁判：先决定是否需要骰子。首次评估失败后最多自动重试 3 次</label>
+            <label><input id="fd-compactJudge" type="checkbox" /> 精简裁判（推荐）：只发送本轮行动、近况和相关设定摘录</label>
             <label><input id="fd-eventDice" type="checkbox" /> 抽取事件方向</label>
             <label><input id="fd-npcDice" type="checkbox" /> 抽取NPC反馈倾向</label>
             <label><input id="fd-actionDice" type="checkbox" /> 事件行动检定</label>
@@ -892,7 +895,7 @@ function buildUI() {
         if (!e.target.checked) { delete cfg.queued[key]; clearInjection(); }
         persist(); updateScope();
     });
-    for (const id of ['fairness', 'autoJudge', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
+    for (const id of ['fairness', 'autoJudge', 'compactJudge', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
         root.querySelector(`#fd-${id}`)?.addEventListener('change', e => changeSetting(id, e.target.checked));
     }
     root.querySelector('#fd-preset')?.addEventListener('change', e => applyPreset(e.target.value));
