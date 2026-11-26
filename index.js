@@ -1,7 +1,8 @@
 import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD100, resolveCheck, parseLevel, isValidAssessment } from './engine.js';
 import { beginRun, assessmentText, resultText, errorText } from './run-log.js';
+import { requestReferee, RefereeStopped } from './referee-request.js';
 /**
- * Fair Dice v1.4.0 — independent SillyTavern UI extension with optional GM adjudication.
+ * Fair Dice v1.4.1 — independent SillyTavern UI extension with optional GM adjudication.
  * Native ST prompt interceptor, no remote calls and no character-card mutation.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
@@ -182,6 +183,13 @@ function initSettings() {
     if (normalizedReference !== data) {
         data.events = normalizeRows(data.events, rowsFromPreset(BUILT_INS.balanced.events));
         data.reactions = normalizeRows(data.reactions, rowsFromPreset(BUILT_INS.balanced.reactions));
+        // Earlier releases saved unsuccessful requests as rolls and even let them be locked.
+        for (const [key, saved] of Object.entries(data.rolls || {})) {
+            if (saved?.bundle?.judgeError) delete data.rolls[key];
+        }
+        for (const [key, bundle] of Object.entries(data.queued || {})) {
+            if (bundle?.judgeError) delete data.queued[key];
+        }
         normalizedReference = data;
     }
     if (!data.enabledChats || typeof data.enabledChats !== 'object') data.enabledChats = {};
@@ -348,6 +356,7 @@ function useRoll(cfg, key) {
     if (cached?.round === rk && cached?.bundle) return cached.bundle;
     const bundle = cfg.queued[key] || drawBundle(cfg, key);
     delete cfg.queued[key];
+    if (bundle.judgeError) return bundle;
     cfg.rolls[key] = { round: rk, bundle };
     // Keep cache small; only most recent round per chat.
     const keys = Object.keys(cfg.rolls);
@@ -398,19 +407,14 @@ const JUDGE_PROMPT = `你是一名独立的桌面角色扮演裁判，而非叙�
 对战力0-100数据逐人标记来源：actorSource/opponentSource为explicit（角色卡明确数值）、inferred（基于已写明训练、武器、伤势合理估算）、unknown（没有资料）。估算必须各自给出具体人物证据actorEvidence/opponentEvidence，并注明actorConfidence/opponentConfidence为high/medium/low；证据不足或low时，战力必须null。不可为玩家或重要NPC自动提高估算值。人物明确不存在的能力、超能力、魔法，不能凭叙事需要添加。
 JSON字段：{"setting":"modern|martial|fantasy|unknown","kind":"narrative|action|combat|none","shouldRoll":false,"eventRelevant":false,"npcRelevant":false,"actorLevel":null,"actorSource":"unknown","actorEvidence":"","actorConfidence":"low","opponentLevel":null,"opponentSource":"unknown","opponentEvidence":"","opponentConfidence":"low","opponentCount":1,"modifier":0,"difficulty":"normal","evidence":"40字内客观依据","stakes":"40字内本次检定风险"}。只输出一个JSON对象；布尔值用true/false；未知战力用null；modifier范围-35到35。不要输出逐步推理。`;
 
-async function independentGM(cfg, key) {
-    const ctx = context();
-    const previous = cfg.assessments?.[key];
-    const round = roundKey();
-    if (previous?.round === round) return previous;
-    if (typeof ctx?.generateQuietPrompt !== 'function') throw new Error('当前酒馆不支持静默裁判');
-    // Clear any previous turn's injected verdict to keep the adjudicator independent.
+async function assessScene(cfg, key, round, log) {
     clearInjection();
     refereeBusy = true;
     let raw;
-    try { raw = await ctx.generateQuietPrompt({ quietPrompt: JUDGE_PROMPT }); }
+    try { raw = await requestReferee(context(), JUDGE_PROMPT, log); }
     finally { refereeBusy = false; }
     if (chatKey() !== key || roundKey() !== round) return null;
+    if (String(raw ?? '').trim()) log('已收到回复，正在读取裁判结果。');
     const result = readAssessment(raw);
     cfg.assessments[key] = result;
     delete cfg.rolls[key];
@@ -419,7 +423,7 @@ async function independentGM(cfg, key) {
 }
 
 // Registered from manifest.json. This runs before prompt assembly, never edits the chat array.
-globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize, _abort, type = 'normal') {
+globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize, abort, type = 'normal') {
     if (['quiet', 'impersonate'].includes(type)) return;
     if (refereeBusy) {
         if (isEnabledHere()) startLog(initSettings(), chatKey(), generationNames[type] || '自动判定')('已有前置裁判请求在等待答复，本次未重复判定。', 'notice');
@@ -440,15 +444,25 @@ globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize,
             log('沿用同一回合的结果，未重新请求裁判或掷骰。');
         } else if (cfg.autoJudge) {
             const previous = cfg.assessments[key];
-            log(previous?.round === round ? '沿用本轮已有的裁判评估。' : '已请求前置 AI 裁判，等待答复。');
-            try {
-                await independentGM(cfg, key);
-            } catch (err) {
-                if (chatKey() === key && roundKey() === round) {
-                    const error = errorText(err);
-                    cfg.assessments[key] = { kind: 'narrative', shouldRoll: false, eventRelevant: false, npcRelevant: false, error, summary: '裁判调用失败：' + error, round };
-                    delete cfg.rolls[key];
-                    persist();
+            if (previous?.round === round && !previous.error) {
+                log('沿用本轮已有的裁判评估。');
+            } else {
+                log(previous?.round === round ? '上次评估失败，已重新请求前置 AI 裁判，等待答复。' : '已请求前置 AI 裁判，等待答复。');
+                try {
+                    await assessScene(cfg, key, round, log);
+                } catch (err) {
+                    const reason = errorText(err);
+                    if (chatKey() === key && roundKey() === round) {
+                        cfg.assessments[key] = { error: reason, round };
+                        delete cfg.rolls[key];
+                        persist();
+                    }
+                    if (err instanceof RefereeStopped) {
+                        log(reason + '。本次未掷骰，下次生成会重新请求裁判。', 'notice');
+                        abort?.(true);
+                        if (chatKey() === key) updateScope();
+                        return;
+                    }
                 }
             }
         } else {
@@ -523,6 +537,7 @@ function applyPreset(value) {
 }
 function readAssessment(raw) {
     const text = String(raw ?? '').trim().replace(/^```(?:json)?\s*/i,'').replace(/```$/,'').trim();
+    if (!text) throw new Error('裁判没有返回内容');
     const brace = text.indexOf('{'), close = text.lastIndexOf('}');
     if (brace < 0 || close <= brace) throw new Error('评估没有返回JSON，请手动设置双方能力。');
     const obj = JSON.parse(text.slice(brace, close+1));
@@ -554,14 +569,13 @@ function readAssessment(raw) {
     };
 }
 async function analyzeNow() {
-    const c=context(), cfg=initSettings(), key=chatKey();
+    const cfg=initSettings(), key=chatKey();
     const button=root?.querySelector('#fd-analyze');
     const label=root?.querySelector('#fd-assessment');
     if (!cfg || !key) return;
     const log = startLog(cfg, key, '手动评估');
-    if (typeof c?.generateQuietPrompt !== 'function') {
-        if (label) label.textContent='当前接口不支持静默AI评估；可手动填写等级及难度。';
-        log('当前酒馆没有提供静默裁判接口。', 'error');
+    if (refereeBusy) {
+        log('已有裁判请求在等待答复，本次未重复评估。', 'notice');
         return;
     }
     const round = roundKey();
@@ -569,13 +583,11 @@ async function analyzeNow() {
     if (button) button.disabled=true;
     if (label) label.textContent='正在使用当前模型阅读人物设定与场景（额外消耗一次请求）…';
     try {
-        const raw=await c.generateQuietPrompt({quietPrompt:JUDGE_PROMPT});
-        if (chatKey() !== key || roundKey() !== round) {
+        const evaluated=await assessScene(cfg, key, round, log);
+        if (!evaluated) {
             log('聊天或回合已变化，本次评估未采用。', 'notice');
             return;
         }
-        const evaluated=readAssessment(raw);
-        cfg.assessments[key]=evaluated;
         invalidateRoll(cfg);
         persist();
         updateScope();
@@ -584,8 +596,8 @@ async function analyzeNow() {
         log('手动评估已保存，尚未掷骰。');
     } catch(e) {
         const reason = '评估未完成：' + errorText(e);
-        log(reason, 'error');
-        if (label && chatKey() === key) label.textContent=reason;
+        log(reason, e instanceof RefereeStopped ? 'notice' : 'error');
+        if (label && chatKey() === key && roundKey() === round) label.textContent=reason;
     } finally { if (button) button.disabled=false; }
 }
 function saveManual() {
@@ -701,6 +713,10 @@ function updateResult() {
     const drawn = queued || (key && cfg.rolls[key]?.bundle);
     c.replaceChildren();
     if (!key) { c.textContent = '请选择角色并打开聊天后使用。'; return; }
+    if (!drawn && cfg.assessments[key]?.round === roundKey() && cfg.assessments[key]?.error) {
+        c.textContent = '裁判评估未完成。下次生成会重新请求裁判。';
+        return;
+    }
     if (!drawn) { c.textContent = '尚无抽签。开启后将在下一次正常生成时自动抽取。'; return; }
     const type = queued ? '已锁定下一次回复' : '最近一轮抽签';
     c.append(el('span', 'fd-result-tag', type));
@@ -799,6 +815,10 @@ function queueDice() {
     const key = chatKey();
     if (!cfg || !key) return;
     const roll = drawBundle(cfg, key);
+    if (roll.judgeError) {
+        startLog(cfg, key, '手动锁定')('裁判评估失败，本轮没有可锁定的骰点。下次生成会重新请求裁判。', 'notice');
+        return;
+    }
     cfg.queued[key] = roll;
     delete cfg.rolls[key];
     startLog(cfg, key, '手动锁定')('已为下一次回复锁定结果。' + resultText(roll));
@@ -820,7 +840,7 @@ function buildUI() {
     root = el('section', 'fd-root'); root.id = 'fair-dice-root';
     root.innerHTML = `
       <details class="fd-shell">
-        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.4</small></span><span class="fd-fold">⌄</span></summary>
+        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.4.1</small></span><span class="fd-fold">⌄</span></summary>
         <div class="fd-content">
           <div class="fd-intro">独立作用于<strong>当前聊天</strong>，不改角色卡／世界书／MVU。可选前置AI裁判：先给出简短裁定→程序掷骰→主模型叙事。</div>
           <div class="fd-onbar"><div><b>当前聊天启用</b><div id="fd-scope" class="fd-sub">尚未选择聊天</div></div><label class="fd-switch"><input id="fd-enabled" type="checkbox" /><span></span></label></div>

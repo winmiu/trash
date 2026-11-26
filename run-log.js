@@ -1,3 +1,5 @@
+import { RefereeStopped } from './referee-request.js';
+
 // Only the history data is saved. The callback and writer live for one invocation.
 export function beginRun(settings, chat, title, changed) {
     if (!settings.runLogs || typeof settings.runLogs !== 'object' || Array.isArray(settings.runLogs)) settings.runLogs = {};
@@ -27,7 +29,7 @@ export function assessmentText(a) {
 }
 
 export function resultText(bundle) {
-    if (bundle.judgeError) return '裁判评估失败，本轮未掷骰。';
+    if (bundle.judgeError) return '裁判评估失败，本次未掷骰。下次生成会重新请求裁判。';
     if (bundle.skipped) return '独立裁判：本轮无须掷骰，继续当前情境';
     const parts = [];
     const check = bundle.check;
@@ -48,14 +50,17 @@ export function resultText(bundle) {
 // Provider errors may contain request bodies or credentials. Save categories, not raw replies.
 export function errorText(err) {
     const message = String(err?.message ?? err ?? '');
+    if (err instanceof RefereeStopped) return err.message;
     if (err instanceof SyntaxError) return '裁判回复的 JSON 格式无效';
+    if (/裁判没有返回内容|No message generated/i.test(message)) return '酒馆返回了空回复，未收到裁判结果';
     if (/没有返回JSON/.test(message)) return '裁判回复中没有 JSON 对象';
     if (/评估类型无效/.test(message)) return '裁判回复中的判定类型无效';
     if (/不支持静默/.test(message)) return '当前酒馆没有提供静默裁判接口';
-    const status = String(err?.status ?? err?.response?.status ?? message.match(/\b(?:HTTP(?:\/\d(?:\.\d)?)?\s*|status(?: code)?\s*[:=]?\s*)([45]\d\d)\b/i)?.[1] ?? '');
+    const status = String(err?.status ?? err?.response?.status ?? message.match(/\b(?:HTTP(?:\/\d(?:\.\d)?)?\s*|status(?: code)?\s*[:=]?\s*)([45]\d\d)\b/i)?.[1] ?? message.match(/\b(429|502|503|504|524)\s+(?:too many requests|bad gateway|service unavailable|gateway time.?out|a timeout occurred)/i)?.[1] ?? '');
     if (/^[45]\d\d$/.test(status)) return '模型接口返回 HTTP ' + status;
-    if (/timeout|time.?out|timed out|超时/i.test(message)) return '模型请求超时';
-    if (/abort|cancel|中止|取消/i.test(message) || err?.name === 'AbortError') return '请求已中止';
+    if (err?.name === 'TimeoutError' || /ETIMEDOUT|timeout|time.?out|timed out|超时/i.test(message)) return '模型请求超时';
+    if (/ECONNRESET|socket hang up|connection reset|连接被重置/i.test(message)) return '模型连接在等待回复时被重置';
+    if (/abort|cancel|中止|取消/i.test(message) || err?.name === 'AbortError') return '请求已中止，接口没有说明中止来源';
     if (/network|fetch|connect|网络|连接/i.test(message)) return '模型接口连接失败';
     return '调用异常，接口没有提供可安全显示的错误详情';
 }
