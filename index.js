@@ -2,7 +2,7 @@ import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD1
 import { beginRun, assessmentText, resultText, errorText, RefereeStopped } from './run-log.js';
 import { requestReferee } from './referee-request.js';
 /**
- * Fair Dice v1.5.0 — independent SillyTavern UI extension with optional GM adjudication.
+ * Fair Dice v1.5.1 — independent SillyTavern UI extension with optional GM adjudication.
  * Native ST prompt interceptor, no remote calls and no character-card mutation.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
@@ -12,7 +12,6 @@ const EVENT_DEPTH = 0;
 const IN_CHAT = 1; // SillyTavern release extension_prompt_types.IN_CHAT
 const SYSTEM_ROLE = 0;
 const MAX_ROWS = 20;
-const WEIGHT_STEP = 5;
 
 const BUILT_INS = Object.freeze({
     balanced: {
@@ -115,7 +114,7 @@ function generationStarted(type = 'normal', _options, dryRun) {
     if (previous) previous.log('下一次生成已开始，上一次没有进入自动判定。', 'notice');
     const log = startLog(initSettings(), key, generationNames[type] || '酒馆生成');
     waitingForInterceptor.set(key, { type, log });
-    log('酒馆开始生成，等待进入公平骰子的判定步骤。');
+    log('酒馆开始生成，等待进入公平骰的判定步骤。');
 }
 
 function generationEnded() {
@@ -123,7 +122,7 @@ function generationEnded() {
     const pending = waitingForInterceptor.get(key);
     if (!pending || refereeBusy) return;
     waitingForInterceptor.delete(key);
-    pending.log('酒馆生成已停止或结束，本次没有进入公平骰子的判定步骤。', 'notice');
+    pending.log('酒馆生成已停止或结束，本次没有进入公平骰的判定步骤。', 'notice');
 }
 
 function chatChanged() {
@@ -510,6 +509,7 @@ function customize(cfg) {
     if (sel) sel.value = 'custom';
     invalidateRoll(cfg);
     persist();
+    updateResult();
 }
 function invalidateRoll(cfg) {
     const key = chatKey();
@@ -654,12 +654,10 @@ function rowDom(kind, row, cfg) {
     note.addEventListener('change', () => { row.note = cleanText(note.value, 160); customize(cfg); });
     textBox.append(name, note);
     const controls = el('div', 'fd-rowcontrols');
-    const minus = makeButton('−', '降低权重5', () => { row.weight = Math.max(0, row.weight - WEIGHT_STEP); weight.value = row.weight; customize(cfg); updatePercentages(); }, 'fd-step');
     const weight = el('input', 'fd-weight');
     weight.type = 'number'; weight.min = '0'; weight.max = '200'; weight.step = '1'; weight.value = row.weight;
     weight.setAttribute('aria-label', '权重值');
     weight.addEventListener('change', () => { row.weight = digits(weight.value, 0); weight.value = row.weight; customize(cfg); updatePercentages(); });
-    const plus = makeButton('+', '提高权重5', () => { row.weight = Math.min(200, row.weight + WEIGHT_STEP); weight.value = row.weight; customize(cfg); updatePercentages(); }, 'fd-step');
     const pct = el('span', 'fd-percent', '0%');
     pct.dataset.rowId = row.id;
     const remove = makeButton('×', '删除这一条', () => {
@@ -668,7 +666,7 @@ function rowDom(kind, row, cfg) {
         customize(cfg);
         renderRows();
     }, 'fd-remove');
-    controls.append(minus, weight, plus, pct, remove);
+    controls.append(weight, pct, remove);
     node.append(checkbox, textBox, controls);
     return node;
 }
@@ -699,11 +697,9 @@ function updatePercentages() {
             const item = rows[i];
             const p = node.querySelector('.fd-percent');
             if (!p || !item) return;
-            p.textContent = item.enabled && total > 0 ? `${Math.round(item.weight / total * 1000) / 10}%` : '0%';
+            p.textContent = item.enabled && cleanText(item.name) && total > 0 ? `${Math.round(item.weight / total * 1000) / 10}%` : '0%';
             node.classList.toggle('fd-muted', !item.enabled || item.weight === 0);
         });
-        const totalEl = root.querySelector(`#fd-${kind}-total`);
-        if (totalEl) totalEl.textContent = total ? `权重合计 ${total} · 自动换算概率` : '未启用有效项目';
     }
 }
 function updateResult() {
@@ -714,14 +710,17 @@ function updateResult() {
     if (!c || !cfg) return;
     const queued = key && cfg.queued[key];
     const drawn = queued || (key && cfg.rolls[key]?.bundle);
+    const cancel = root.querySelector('#fd-unqueue');
+    if (cancel) cancel.hidden = !queued;
+    const failed = Boolean(key && cfg.assessments[key]?.round === roundKey() && cfg.assessments[key]?.error);
+    c.hidden = !drawn && !failed;
     c.replaceChildren();
-    if (!key) { c.textContent = '请选择角色并打开聊天后使用。'; return; }
-    if (!drawn && cfg.assessments[key]?.round === roundKey() && cfg.assessments[key]?.error) {
+    if (!drawn && failed) {
         c.textContent = '裁判评估未完成。下次生成会重新请求裁判。';
         return;
     }
-    if (!drawn) { c.textContent = '尚无抽签。开启后将在下一次正常生成时自动抽取。'; return; }
-    const type = queued ? '已锁定下一次回复' : '最近一轮抽签';
+    if (!drawn) return;
+    const type = queued ? '下一回复已锁定' : '最近判定';
     c.append(el('span', 'fd-result-tag', type));
     c.append(el('div', 'fd-result-lines', resultText(drawn)));
 }
@@ -761,16 +760,19 @@ function updateScope() {
     const key = chatKey();
     const label = root.querySelector('#fd-scope');
     const toggle = root.querySelector('#fd-enabled');
-    const chatName = context()?.name2 || '当前聊天';
-    if (label) label.textContent = key ? `作用于当前聊天：${chatName}` : '尚未选择聊天';
+    const method = cfg.autoJudge ? (cfg.compactJudge ? 'compact' : 'full') : 'local';
+    const refereeSelect = root.querySelector('#fd-referee');
+    if (refereeSelect) refereeSelect.value = method;
+    if (label) {
+        const note = { compact:'精简 AI 裁判 · 失败最多重试 3 次', full:'完整 AI 裁判 · 失败最多重试 3 次', local:'本地规则自动判定' };
+        label.textContent = !key ? '请先打开一个聊天。' : cfg.enabledChats[key] ? note[method] : '开启后，生成回复时自动判定。';
+    }
     if (toggle) {
         toggle.disabled = !key;
         toggle.checked = key ? Boolean(cfg.enabledChats[key]) : false;
     }
     const mode=root.querySelector('#fd-mode');
     if (mode) mode.value=key?(cfg.modeByChat?.[key]||'auto'):'auto';
-    const identified=root.querySelector('#fd-kind-result');
-    if (identified) identified.textContent=key?`识别：${checkMode(cfg,key)==='combat'?'战斗检定':checkMode(cfg,key)==='action'?'事件检定':'事件方向'}`:'尚未打开聊天';
     const input=inputForChat(cfg,key);
     for(const [id,val] of Object.entries({'fd-actor':input.actorLevel??'', 'fd-opponent':input.opponentLevel??'', 'fd-enemies':input.opponentCount, 'fd-modifier':input.modifier, 'fd-difficulty':input.difficulty})) {
         const el=root.querySelector('#'+id); if (el) el.value=val;
@@ -778,8 +780,8 @@ function updateScope() {
     const combat=root.querySelector('#fd-combat-profile'); if(combat) combat.value=cfg.combatProfile;
     const evaluated=cfg.assessments?.[key];
     const assessmentLabel=root.querySelector('#fd-assessment');
-    if(assessmentLabel) assessmentLabel.textContent=evaluated?.round===roundKey() ? (evaluated.error ? '裁判评估失败：'+evaluated.error : assessmentText(evaluated)) : '本轮尚未评估。未定等级允许依据可靠事实估算，证据不足时暂缓硬判。';
-    for (const id of ['fairness', 'autoJudge', 'compactJudge', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
+    if(assessmentLabel) assessmentLabel.textContent=evaluated?.round===roundKey() ? (evaluated.error ? '裁判评估失败：'+evaluated.error : assessmentText(evaluated)) : '';
+    for (const id of ['fairness', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
         const inp = root.querySelector(`#fd-${id}`);
         if (inp) inp.checked = Boolean(cfg[id]);
     }
@@ -806,7 +808,6 @@ function changeSetting(key, bool) {
     const cfg = initSettings();
     if (!cfg) return;
     cfg[key] = Boolean(bool);
-    if (key === 'compactJudge') { persist(); return; }
     invalidateRoll(cfg);
     if (key === 'autoJudge') { const chat = chatKey(); if (chat) delete cfg.assessments[chat]; }
     if (!cfg.fairness && !cfg.eventDice && !cfg.npcDice && !cfg.actionDice && !cfg.combatDice) clearInjection();
@@ -844,44 +845,51 @@ function buildUI() {
     root = el('section', 'fd-root'); root.id = 'fair-dice-root';
     root.innerHTML = `
       <details class="fd-shell">
-        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.5.0</small></span><span class="fd-fold">⌄</span></summary>
+        <summary class="fd-title"><span aria-hidden="true">🎲</span> 公平骰 <span class="fd-fold" aria-hidden="true">⌄</span></summary>
         <div class="fd-content">
-          <div class="fd-intro">独立作用于<strong>当前聊天</strong>，不改角色卡／世界书／MVU。可选前置AI裁判：先给出简短裁定→程序掷骰→主模型叙事。</div>
-          <div class="fd-onbar"><div><b>当前聊天启用</b><div id="fd-scope" class="fd-sub">尚未选择聊天</div></div><label class="fd-switch"><input id="fd-enabled" type="checkbox" /><span></span></label></div>
-          <details id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><div class="fd-log-list"></div></details>
-          <div class="fd-options">
-            <label><input id="fd-fairness" type="checkbox" /> 公平判定：不无理由偏袒玩家</label>
-            <label><input id="fd-autoJudge" type="checkbox" /> 前置 AI 裁判：先决定是否需要骰子。首次评估失败后最多自动重试 3 次</label>
-            <label><input id="fd-compactJudge" type="checkbox" /> 精简裁判（推荐）：只发送本轮行动、近况和相关设定摘录</label>
-            <label><input id="fd-eventDice" type="checkbox" /> 抽取事件方向</label>
-            <label><input id="fd-npcDice" type="checkbox" /> 抽取NPC反馈倾向</label>
-            <label><input id="fd-actionDice" type="checkbox" /> 事件行动检定</label>
-            <label><input id="fd-combatDice" type="checkbox" /> 战斗交锋检定</label>
+          <div class="fd-onbar">
+            <div><b id="fd-enable-label">当前聊天启用</b><div id="fd-scope" class="fd-sub"></div></div>
+            <label class="fd-switch"><input id="fd-enabled" type="checkbox" aria-labelledby="fd-enable-label" /><span></span></label>
           </div>
-          <div class="fd-modebar"><label for="fd-mode">本聊天判定模式</label><select id="fd-mode"><option value="auto">自动识别（默认）</option><option value="narrative">事件方向</option><option value="action">事件检定</option><option value="combat">战斗检定</option></select><span id="fd-kind-result" class="fd-kind">自动</span></div>
-          <details class="fd-judge"><summary>⚖ 战斗／事件条件设置（可选）</summary>
-            <div class="fd-fields">
-              <label>行动方战力 0–100<input id="fd-actor" type="number" min="0" max="100" placeholder="空=未知" /></label>
-              <label>对手战力 0–100<input id="fd-opponent" type="number" min="0" max="100" placeholder="空=未知" /></label>
-              <label>对手人数<input id="fd-enemies" type="number" min="1" max="100" value="1" /></label>
-              <label>态势修正 −35～35<input id="fd-modifier" type="number" min="-35" max="35" value="0" /></label>
-              <label>事件难度<select id="fd-difficulty"><option value="trivial">很容易</option><option value="easy">容易</option><option value="normal" selected>一般</option><option value="hard">困难</option><option value="extreme">极难</option><option value="impossible">客观不可能</option></select></label>
-              <label>战斗预设<select id="fd-combat-profile"><option value="auto">自动适配世界观（推荐）</option><option value="urban">现实／现代（不按武侠阶位）</option><option value="neutral">公平标准</option><option value="strict">阶位严谨</option><option value="cinematic">戏剧波动</option></select></label>
+          <div id="fd-last-result" class="fd-result" aria-live="polite" hidden></div>
+          <details class="fd-drawer" id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><div class="fd-log-list"></div></details>
+          <details class="fd-drawer fd-judge"><summary>判定设置</summary>
+            <p class="fd-help">以下设置用于所有已启用的聊天。</p>
+            <label class="fd-select">裁判方式<select id="fd-referee"><option value="compact">AI · 精简上下文</option><option value="full">AI · 完整上下文</option><option value="local">本地规则</option></select></label>
+            <div class="fd-options">
+              <label><input id="fd-fairness" type="checkbox" /> 公平叙事指引</label>
+              <label><input id="fd-eventDice" type="checkbox" /> 事件走向</label>
+              <label><input id="fd-npcDice" type="checkbox" /> NPC 反应</label>
+              <label><input id="fd-actionDice" type="checkbox" /> 行动检定</label>
+              <label><input id="fd-combatDice" type="checkbox" /> 战斗检定</label>
             </div>
-            <div class="fd-roll-actions"><button class="fd-btn" id="fd-analyze" type="button">AI评估当前场景</button><span class="fd-sub">会额外调用一次当前模型；没有等级时使用，结果只供本轮参考。</span></div>
-            <div id="fd-assessment" class="fd-assessment">尚未评估</div>
-            <label class="fd-unknown"><input id="fd-allowUnknownCombat" type="checkbox" /> 允许等级未知时以50%暂定基准掷骰（默认关闭，不推荐严谨战斗）</label>
-            <div class="fd-help">战力0–100仅作为临时内部数值；现代现实不强套武侠阶位，武侠卡才使用五阶差；双方实力、人数劣势、武器与伤势影响胜算。未知等级默认暂缓硬判，需要先评估或填数值；人数极端悬殊有硬上限。</div>
+            <label class="fd-select">战斗规则<select id="fd-combat-profile"><option value="auto">适配世界观</option><option value="urban">现代现实</option><option value="neutral">标准</option><option value="strict">严格阶位</option><option value="cinematic">戏剧波动</option></select></label>
+            <label class="fd-unknown"><input id="fd-allowUnknownCombat" type="checkbox" /> 战力未知时也允许检定</label>
           </details>
-          <div class="fd-presets"><label for="fd-preset">加权预设</label><select id="fd-preset"><option value="balanced">公平中立 · 默认</option><option value="slice">生活日常 · 低冲突</option><option value="dynamic">变化较多 · 剧情向</option><option value="custom">自定义 · 我的权重</option></select></div>
-          <div class="fd-help">权重、事件与NPC反应<b>按当前聊天独立保存</b>。任意修改自动切换「自定义」，无需凑满100；换角色不会沿用本聊天的自定义权重。</div>
-          <div class="fd-section-head"><h4>事件方向</h4><button id="fd-add-events" class="fd-btn fd-add" type="button">+ 添加事件</button></div>
-          <div id="fd-events-rows" class="fd-rows"></div><div id="fd-events-total" class="fd-total"></div>
-          <div class="fd-section-head"><h4>NPC反馈</h4><button id="fd-add-reactions" class="fd-btn fd-add" type="button">+ 添加反应</button></div>
-          <div id="fd-reactions-rows" class="fd-rows"></div><div id="fd-reactions-total" class="fd-total"></div>
-          <div class="fd-roll-actions"><button id="fd-roll" class="fd-btn fd-primary" type="button">🎲 抽签并锁定下一回复</button><button id="fd-unqueue" class="fd-btn" type="button">取消锁定</button></div>
-          <div id="fd-last-result" class="fd-result" aria-live="polite"></div>
-          <div class="fd-foot">前置裁判只输出可核对的简短事实依据，不收集或展示模型内部思维链。掷骰只判本次事件／行动／一次交锋；同一回合重生成复用骰点。关闭后撤销注入，角色卡和MVU不变。</div>
+          <details class="fd-drawer fd-judge"><summary>手动判定</summary>
+            <p class="fd-help">仅用于当前聊天。战力可留空，由裁判评估。</p>
+            <label class="fd-select">判定模式<select id="fd-mode"><option value="auto">自动识别</option><option value="narrative">事件走向</option><option value="action">行动检定</option><option value="combat">战斗检定</option></select></label>
+            <div class="fd-fields">
+              <label>行动方战力<input id="fd-actor" type="number" min="0" max="100" placeholder="0–100" /></label>
+              <label>对手战力<input id="fd-opponent" type="number" min="0" max="100" placeholder="0–100" /></label>
+              <label>对手人数<input id="fd-enemies" type="number" min="1" max="100" /></label>
+              <label>态势修正<input id="fd-modifier" type="number" min="-35" max="35" placeholder="−35～35" /></label>
+              <label>行动难度<select id="fd-difficulty"><option value="trivial">很容易</option><option value="easy">容易</option><option value="normal">一般</option><option value="hard">困难</option><option value="extreme">极难</option><option value="impossible">不可能</option></select></label>
+            </div>
+            <div class="fd-roll-actions"><button class="fd-btn" id="fd-analyze" type="button">AI 评估场景</button><button class="fd-btn" id="fd-roll" type="button">抽取并锁定</button><button class="fd-btn" id="fd-unqueue" type="button" hidden>取消锁定</button></div>
+            <p class="fd-help">评估会调用模型。锁定结果用于下一次回复。</p>
+            <div id="fd-assessment" class="fd-assessment"></div>
+          </details>
+          <details class="fd-drawer"><summary>事件与反应权重</summary>
+            <div class="fd-presets"><label for="fd-preset">本聊天预设</label><select id="fd-preset"><option value="balanced">公平中立</option><option value="slice">生活日常</option><option value="dynamic">变化较多</option><option value="custom">自定义</option></select></div>
+            <p class="fd-help">直接输入权重（0–200），概率按已启用项目自动换算。</p>
+            <details class="fd-list"><summary>事件走向</summary><div id="fd-events-rows" class="fd-rows"></div><button id="fd-add-events" class="fd-btn" type="button">添加事件</button></details>
+            <details class="fd-list"><summary>NPC 反应</summary><div id="fd-reactions-rows" class="fd-rows"></div><button id="fd-add-reactions" class="fd-btn" type="button">添加反应</button></details>
+          </details>
+          <footer class="fd-foot">
+            <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
+            <small class="fd-signature"><span>v1.5.1</span> winmiu</small>
+          </footer>
         </div>
       </details>`;
     host.append(root);
@@ -895,10 +903,19 @@ function buildUI() {
         if (!e.target.checked) { delete cfg.queued[key]; clearInjection(); }
         persist(); updateScope();
     });
-    for (const id of ['fairness', 'autoJudge', 'compactJudge', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
+    for (const id of ['fairness', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
         root.querySelector(`#fd-${id}`)?.addEventListener('change', e => changeSetting(id, e.target.checked));
     }
     root.querySelector('#fd-preset')?.addEventListener('change', e => applyPreset(e.target.value));
+    root.querySelector('#fd-referee')?.addEventListener('change', e => {
+        const cfg = initSettings();
+        const method = e.target.value;
+        const useAI = method !== 'local';
+        if (useAI) cfg.compactJudge = method === 'compact';
+        if (useAI !== cfg.autoJudge) changeSetting('autoJudge', useAI);
+        else persist();
+        updateScope();
+    });
     root.querySelector('#fd-mode')?.addEventListener('change', saveMode);
     root.querySelector('#fd-combat-profile')?.addEventListener('change', e => {
         const cfg=initSettings();if(!cfg)return;

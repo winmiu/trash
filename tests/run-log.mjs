@@ -32,7 +32,7 @@ const intercept = (type = 'normal') => globalThis.FairDiceIndependentInterceptor
 start('quiet'); start('impersonate'); start('normal', true);
 assert.equal(cfg.runLogs, undefined, 'silent and preview requests do not create misleading entries');
 start(); ctx.eventSource.emit('stop');
-assert.match(lines(), /没有进入公平骰子/);
+assert.match(lines(), /没有进入公平骰/);
 
 let requests = 0;
 ctx.generateQuietPrompt = async ({ quietPrompt }) => {

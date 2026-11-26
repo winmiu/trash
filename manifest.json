@@ -1,12 +1,12 @@
 {
-  "display_name": "公平骰子 · 跑团GM裁定与加权检定",
+  "display_name": "公平骰",
   "loading_order": 90,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
   "author": "winmiu",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "generate_interceptor": "FairDiceIndependentInterceptor",
   "hooks": {
     "activate": "onActivate",

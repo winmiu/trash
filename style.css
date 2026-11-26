@@ -10,13 +10,9 @@
 #fair-dice-root .fd-shell { border: 1px solid var(--fd-line); border-radius: 12px; overflow: hidden; background: var(--fd-soft); }
 #fair-dice-root .fd-title { cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 12px 14px; list-style: none; user-select: none; font-weight: 650; }
 #fair-dice-root .fd-title::-webkit-details-marker { display: none; }
-#fair-dice-root .fd-symbol { font-size: 21px; }
-#fair-dice-root .fd-title small { font-size: .76em; font-weight: 400; opacity: .65; margin-left: 4px; }
 #fair-dice-root .fd-fold { margin-left: auto; transition: transform .2s; }
 #fair-dice-root .fd-shell[open] .fd-fold { transform: rotate(180deg); }
 #fair-dice-root .fd-content { padding: 14px; border-top: 1px solid var(--fd-line); font-size: 13px; }
-#fair-dice-root .fd-intro, #fair-dice-root .fd-help, #fair-dice-root .fd-foot { font-size: 12px; line-height: 1.65; opacity: .8; }
-#fair-dice-root .fd-intro { margin-bottom: 12px; }
 #fair-dice-root .fd-onbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 12px; border: 1px solid var(--fd-line); border-radius: 10px; background: color-mix(in srgb, var(--fd-accent) 9%, transparent); }
 #fair-dice-root .fd-sub { margin-top: 3px; font-size: 11px; opacity: .65; }
 #fair-dice-root .fd-switch { display: inline-flex; align-items: center; cursor: pointer; }
@@ -33,9 +29,16 @@
 #fair-dice-root .fd-presets { display: flex; align-items: center; gap: 14px; margin: 5px 0 10px; }
 #fair-dice-root .fd-presets label { min-width: 65px; }
 #fair-dice-root .fd-presets select { flex: 1; width: auto; min-height: 34px; border-radius: 8px; border: 1px solid var(--fd-line); background: var(--SmartThemeBlurTintColor, #25242c); color: inherit; padding: 3px 8px; }
-#fair-dice-root .fd-help { margin-bottom: 16px; }
-#fair-dice-root .fd-section-head { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 9px; padding-top: 12px; border-top: 1px solid var(--fd-line); }
-#fair-dice-root .fd-section-head h4 { margin: 0; font-size: 14px; color: var(--fd-accent); letter-spacing: .03em; }
+#fair-dice-root .fd-help { margin: 6px 0; font-size: 12px; line-height: 1.5; opacity: .78; }
+#fair-dice-root .fd-drawer { border-bottom: 1px solid var(--fd-line); }
+#fair-dice-root .fd-drawer > summary, #fair-dice-root .fd-list > summary { cursor: pointer; padding: 9px 2px; font-weight: 600; }
+#fair-dice-root .fd-drawer[open] { padding-bottom: 8px; }
+#fair-dice-root .fd-list { margin-inline-start: 8px; }
+#fair-dice-root .fd-list .fd-btn { margin-top: 3px; }
+#fair-dice-root .fd-select { display: flex; align-items: center; gap: 8px; }
+#fair-dice-root .fd-judge select { min-width: 0; max-width: 100%; color: inherit; background: var(--SmartThemeBlurTintColor,#25242c); border: 1px solid var(--fd-line); border-radius: 6px; padding: 4px; }
+#fair-dice-root .fd-select select { flex: 1; }
+#fair-dice-root .fd-assessment:empty, #fair-dice-root [hidden] { display: none; }
 #fair-dice-root .fd-rows { display: grid; gap: 7px; }
 #fair-dice-root .fd-row { display: flex; align-items: center; gap: 9px; border: 1px solid var(--fd-line); padding: 8px; border-radius: 9px; }
 #fair-dice-root .fd-muted { opacity: .47; }
@@ -44,21 +47,20 @@
 #fair-dice-root .fd-itemname { font-weight: 550; }
 #fair-dice-root .fd-itemnote { opacity: .76; font-size: 11px; }
 #fair-dice-root .fd-rowcontrols { display: flex; align-items: center; gap: 4px; flex: none; }
-#fair-dice-root .fd-rowcontrols .fd-weight { width: 48px; text-align: center; appearance: textfield; }
-#fair-dice-root .fd-weight::-webkit-inner-spin-button, #fair-dice-root .fd-weight::-webkit-outer-spin-button { appearance: none; }
+#fair-dice-root .fd-rowcontrols .fd-weight { width: 48px; text-align: center;  }
 #fair-dice-root .fd-percent { width: 45px; font-size: 11px; text-align: center; opacity: .78; font-variant-numeric: tabular-nums; }
 #fair-dice-root .fd-btn { border: 1px solid var(--fd-line); background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #272730) 65%, transparent); color: inherit; border-radius: 7px; min-width: 28px; min-height: 29px; padding: 4px 7px; cursor: pointer; font-family: inherit; font-size: 12px; }
 #fair-dice-root .fd-btn:hover { filter: brightness(1.18); border-color: var(--fd-accent); }
 #fair-dice-root .fd-btn:focus-visible { outline: 2px solid var(--fd-accent); outline-offset: 2px; }
-#fair-dice-root .fd-btn.fd-step { font-weight: 750; font-size: 15px; }
 #fair-dice-root .fd-btn.fd-remove { opacity: .65; }
-#fair-dice-root .fd-btn.fd-primary { background: #83623a; border-color: #a88151; color: #fff; padding: 7px 12px; }
-#fair-dice-root .fd-add { font-size: 11px; }
-#fair-dice-root .fd-total { font-size: 11px; text-align: right; margin-top: 5px; opacity: .65; }
-#fair-dice-root .fd-roll-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
-#fair-dice-root .fd-result { font-size: 12px; margin-top: 10px; min-height: 39px; padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--fd-line); line-height: 1.55; }
+#fair-dice-root .fd-roll-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+#fair-dice-root .fd-result { font-size: 12px; margin-top: 10px;  padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--fd-line); line-height: 1.55; }
 #fair-dice-root .fd-result-tag { color: var(--fd-accent); display: block; font-size: 10px; margin-bottom: 3px; }
-#fair-dice-root .fd-foot { padding-top: 12px; margin-top: 14px; border-top: 1px solid var(--fd-line); }
+#fair-dice-root .fd-foot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 10px; padding-top: 9px; }
+#fair-dice-root .fd-foot small { font-size: 11px; line-height: 1.55; }
+#fair-dice-root .fd-foot a { color: inherit; text-underline-offset: 2px; }
+#fair-dice-root .fd-signature { margin-inline-start: auto; font-weight: 650; letter-spacing: .08em; color: var(--fd-accent); }
+#fair-dice-root .fd-signature span { margin-inline-end: 4px; font-weight: 400; letter-spacing: normal; color: var(--SmartThemeBodyColor, #ded9d3); opacity: .72; }
 @media (max-width: 720px) {
   #fair-dice-root .fd-content { padding: 10px; }
   #fair-dice-root .fd-row { flex-wrap: wrap; }
@@ -68,31 +70,16 @@
   #fair-dice-root .fd-options { display: grid; }
 }
 /* v1.1 event/action/combat judgement */
-#fair-dice-root .fd-modebar { display: flex; flex-wrap:wrap; align-items:center; gap:9px; padding:10px 0; }
-#fair-dice-root .fd-modebar label { flex: none; font-weight: 600; }
-#fair-dice-root .fd-modebar select, #fair-dice-root .fd-judge select { border:1px solid var(--fd-line); background: var(--SmartThemeBlurTintColor,#25242c); color:inherit; min-height:30px; border-radius:7px; padding:4px 6px; flex:1; }
-#fair-dice-root .fd-kind { font-size:11px; opacity:.7; }
-#fair-dice-root .fd-judge { border: 1px solid var(--fd-line); border-radius:9px; margin:9px 0 13px; padding:8px 12px 11px; }
-#fair-dice-root .fd-judge summary { cursor:pointer; font-weight:600; }
 #fair-dice-root .fd-fields { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin-top:12px; }
 #fair-dice-root .fd-fields label { font-size:11px; opacity:.9; display:grid; gap:3px; min-width:0; }
 #fair-dice-root .fd-fields input { width:100%; }
 #fair-dice-root .fd-assessment { margin:8px 0; padding:8px; font-size:11px; border-left:2px solid var(--fd-accent); background:var(--fd-soft); line-height:1.5; }
-#fair-dice-root .fd-roll-actions .fd-sub { flex:1; min-width:140px; font-size:11px; }
 @media (max-width:720px) {
  #fair-dice-root .fd-fields { grid-template-columns:repeat(2,minmax(0,1fr)); }
- #fair-dice-root .fd-modebar { display:grid; }
 }
 
 #fair-dice-root .fd-unknown { display:flex; align-items:center; gap:6px; font-size:11px; margin:10px 0; opacity:.86; }
 #fair-dice-root .fd-unknown input { accent-color:var(--fd-accent); }
-#fair-dice-root #fd-log {
-    margin: .55em 0;
-    padding: .4em .65em;
-    border: 1px solid var(--SmartThemeBorderColor, #8888);
-    border-radius: .45em;
-}
-#fair-dice-root #fd-log summary { cursor: pointer; font-weight: 600; }
 #fair-dice-root .fd-log-status { margin: .6em 0; font-size: .9em; }
 #fair-dice-root .fd-log-list { max-height: 22em; overflow: auto; overflow-wrap: anywhere; }
 #fair-dice-root .fd-log-run { border-top: 1px solid var(--SmartThemeBorderColor, #8888); padding: .55em 0; font-size: .9em; }
