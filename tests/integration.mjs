@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 const injected=[];
 let gmResponse={};let quietCalls=0;
 const ctx={
@@ -9,7 +10,19 @@ const ctx={
  async generateQuietPrompt(){quietCalls++;return JSON.stringify(gmResponse);},
 };
 globalThis.SillyTavern={getContext:()=>ctx};
-await import('../index.js');
+// 1.16.0 inserts a module script without calling onActivate. Newer hosts do both.
+const entry = new URL('../index.js', import.meta.url);
+ctx.eventSource = new EventEmitter();
+ctx.eventTypes = { APP_READY: 'app_ready' };
+globalThis.document = Object.assign(new EventTarget(), {
+    readyState: 'loading',
+    scripts: [{ src: entry.href }],
+});
+const { onActivate } = await import(entry.href);
+assert.equal(ctx.eventSource.listenerCount('app_ready'), 1, 'script insertion registers startup');
+onActivate();
+assert.equal(ctx.eventSource.listenerCount('app_ready'), 1, 'a subsequent activate hook does not register startup twice');
+delete globalThis.document;
 const roll=async(type='normal')=>globalThis.FairDiceIndependentInterceptor([],512,()=>{},type);
 const cfg=ctx.extensionSettings.fair_dice_winmiu_v1 ||= {};
 cfg.enabledChats={'char:a.png:chat-A':true, 'char:a.png:chat-B':true};

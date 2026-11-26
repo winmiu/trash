@@ -1,8 +1,8 @@
-# Fair Dice · 公平骰子（SillyTavern 扩展） v1.3.0
+# Fair Dice · 公平骰子（SillyTavern 扩展） v1.3.1
 
 独立于角色卡、世界书和正则的 **跑团裁定 + 真实掷骰 + 加权事件** 前端扩展。作者署名：winmiu。
 
-> **版本说明**：这是经过静态校验和模拟上下文测试的测试版，尚未在任意具体用户的 SillyTavern 实例中完成安装兼容性测试。请先备份设置/聊天。这个目录本身就是 GitHub 仓库的根目录（不要在仓库根目录再套一层 `fair-dice`）。
+> **v1.3.1 兼容修订** · 修复了 SillyTavern 1.16.0 安装后不显示「公平骰子」设置面板的问题。扩展现在会在酒馆加载脚本时启动，也支持新版酒馆的启动钩子。`manifest.json` 位于仓库根目录。
 
 ## 最重要的区别：先裁定，再掷骰，最后叙事
 
@@ -18,7 +18,7 @@
 
 **A. GitHub仓库安装（最适合分享）**
 
-本项目源码已发布在 [winmiu/trash](https://github.com/winmiu/trash)。打开SillyTavern的「扩展 → 安装扩展」，粘贴 `https://github.com/winmiu/trash`；按需要选择当前用户或所有用户安装。电脑上的SillyTavern通常需要已安装Git。
+打开 SillyTavern 的「扩展 → 安装扩展」，粘贴 `https://github.com/winmiu/trash.git`，选择当前用户或所有用户。安装后刷新页面，打开「扩展 → 公平骰子」。运行酒馆的设备需要安装 Git。
 
 **B. 无GitHub的本地安装**
 

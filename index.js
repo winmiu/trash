@@ -1,6 +1,6 @@
 import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD100, resolveCheck, parseLevel, isValidAssessment } from './engine.js';
 /**
- * Fair Dice v1.3.0 — independent SillyTavern UI extension with optional GM adjudication.
+ * Fair Dice v1.3.1 — independent SillyTavern UI extension with optional GM adjudication.
  * Native ST prompt interceptor, no remote calls and no character-card mutation.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
@@ -89,6 +89,7 @@ const DEFAULTS = {
 };
 
 let initialized = false;
+let activationRegistered = false;
 let extensionActive = true;
 let root = null;
 let listenersAttached = false;
@@ -790,7 +791,8 @@ function init() {
 
 export function onActivate() {
     const c = context();
-    if (!c?.eventSource?.on) return;
+    if (activationRegistered || !c?.eventSource?.on) return;
+    activationRegistered = true;
     const ready = c.eventTypes?.APP_READY ?? c.event_types?.APP_READY;
     if (ready) c.eventSource.on(ready, init);
     // APP_READY might already have fired when an extension is enabled later.
@@ -799,3 +801,9 @@ export function onActivate() {
 }
 export function onEnable() { extensionActive = true; init(); updateScope(); }
 export function onDisable() { extensionActive = false; clearInjection(); updateScope(); }
+
+// SillyTavern 1.16.0 activates the extension by inserting its module script.
+// A dynamic import for a lifecycle hook can occur independently of activation.
+if (typeof document !== 'undefined' && Array.from(document.scripts).some(script => script.src === import.meta.url)) {
+    onActivate();
+}
