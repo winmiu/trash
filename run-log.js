@@ -1,4 +1,8 @@
-import { RefereeStopped } from './referee-request.js';
+export class RefereeStopped extends Error {
+    constructor() {
+        super('等待裁判期间，酒馆发出了停止生成信号');
+    }
+}
 
 // Only the history data is saved. The callback and writer live for one invocation.
 export function beginRun(settings, chat, title, changed) {

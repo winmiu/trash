@@ -1,8 +1,8 @@
 import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD100, resolveCheck, parseLevel, isValidAssessment } from './engine.js';
-import { beginRun, assessmentText, resultText, errorText } from './run-log.js';
-import { requestReferee, RefereeStopped } from './referee-request.js';
+import { beginRun, assessmentText, resultText, errorText, RefereeStopped } from './run-log.js';
+import { requestReferee } from './referee-request.js';
 /**
- * Fair Dice v1.4.1 — independent SillyTavern UI extension with optional GM adjudication.
+ * Fair Dice v1.4.2 — independent SillyTavern UI extension with optional GM adjudication.
  * Native ST prompt interceptor, no remote calls and no character-card mutation.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
@@ -407,15 +407,14 @@ const JUDGE_PROMPT = `你是一名独立的桌面角色扮演裁判，而非叙�
 对战力0-100数据逐人标记来源：actorSource/opponentSource为explicit（角色卡明确数值）、inferred（基于已写明训练、武器、伤势合理估算）、unknown（没有资料）。估算必须各自给出具体人物证据actorEvidence/opponentEvidence，并注明actorConfidence/opponentConfidence为high/medium/low；证据不足或low时，战力必须null。不可为玩家或重要NPC自动提高估算值。人物明确不存在的能力、超能力、魔法，不能凭叙事需要添加。
 JSON字段：{"setting":"modern|martial|fantasy|unknown","kind":"narrative|action|combat|none","shouldRoll":false,"eventRelevant":false,"npcRelevant":false,"actorLevel":null,"actorSource":"unknown","actorEvidence":"","actorConfidence":"low","opponentLevel":null,"opponentSource":"unknown","opponentEvidence":"","opponentConfidence":"low","opponentCount":1,"modifier":0,"difficulty":"normal","evidence":"40字内客观依据","stakes":"40字内本次检定风险"}。只输出一个JSON对象；布尔值用true/false；未知战力用null；modifier范围-35到35。不要输出逐步推理。`;
 
-async function assessScene(cfg, key, round, log) {
+async function assessScene(cfg, key, round, log, automatic) {
     clearInjection();
     refereeBusy = true;
-    let raw;
-    try { raw = await requestReferee(context(), JUDGE_PROMPT, log); }
+    const isCurrent = () => extensionActive && key === chatKey() && round === roundKey() && (!automatic || (cfg.autoJudge && isEnabledHere()));
+    let result;
+    try { result = await requestReferee(context(), JUDGE_PROMPT, { log, readAssessment, isCurrent }); }
     finally { refereeBusy = false; }
-    if (chatKey() !== key || roundKey() !== round) return null;
-    if (String(raw ?? '').trim()) log('已收到回复，正在读取裁判结果。');
-    const result = readAssessment(raw);
+    if (!result || !isCurrent()) return null;
     cfg.assessments[key] = result;
     delete cfg.rolls[key];
     persist();
@@ -449,7 +448,10 @@ globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize,
             } else {
                 log(previous?.round === round ? '上次评估失败，已重新请求前置 AI 裁判，等待答复。' : '已请求前置 AI 裁判，等待答复。');
                 try {
-                    await assessScene(cfg, key, round, log);
+                    if (!await assessScene(cfg, key, round, log, true)) {
+                        log('聊天、回合或开关已变化，未提交本次结果。', 'notice');
+                        return;
+                    }
                 } catch (err) {
                     const reason = errorText(err);
                     if (chatKey() === key && roundKey() === round) {
@@ -581,9 +583,9 @@ async function analyzeNow() {
     const round = roundKey();
     log('已手动请求 AI 评估，等待答复。');
     if (button) button.disabled=true;
-    if (label) label.textContent='正在使用当前模型阅读人物设定与场景（额外消耗一次请求）…';
+    if (label) label.textContent='正在评估当前场景。首次失败后最多自动重试 3 次，进度见运行日志。';
     try {
-        const evaluated=await assessScene(cfg, key, round, log);
+        const evaluated=await assessScene(cfg, key, round, log, false);
         if (!evaluated) {
             log('聊天或回合已变化，本次评估未采用。', 'notice');
             return;
@@ -840,14 +842,14 @@ function buildUI() {
     root = el('section', 'fd-root'); root.id = 'fair-dice-root';
     root.innerHTML = `
       <details class="fd-shell">
-        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.4.1</small></span><span class="fd-fold">⌄</span></summary>
+        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.4.2</small></span><span class="fd-fold">⌄</span></summary>
         <div class="fd-content">
           <div class="fd-intro">独立作用于<strong>当前聊天</strong>，不改角色卡／世界书／MVU。可选前置AI裁判：先给出简短裁定→程序掷骰→主模型叙事。</div>
           <div class="fd-onbar"><div><b>当前聊天启用</b><div id="fd-scope" class="fd-sub">尚未选择聊天</div></div><label class="fd-switch"><input id="fd-enabled" type="checkbox" /><span></span></label></div>
           <details id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><div class="fd-log-list"></div></details>
           <div class="fd-options">
             <label><input id="fd-fairness" type="checkbox" /> 公平判定：不无理由偏袒玩家</label>
-            <label><input id="fd-autoJudge" type="checkbox" /> 前置AI裁判（推荐）：先决定是否需要骰子，另耗一次模型请求</label>
+            <label><input id="fd-autoJudge" type="checkbox" /> 前置 AI 裁判：先决定是否需要骰子。首次评估失败后最多自动重试 3 次</label>
             <label><input id="fd-eventDice" type="checkbox" /> 抽取事件方向</label>
             <label><input id="fd-npcDice" type="checkbox" /> 抽取NPC反馈倾向</label>
             <label><input id="fd-actionDice" type="checkbox" /> 事件行动检定</label>

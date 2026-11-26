@@ -2,9 +2,19 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { beginRun, errorText } from '../run-log.js';
 
+const scheduledDelays = [];
+const realSetTimeout = globalThis.setTimeout;
+let duringBackoff;
+globalThis.setTimeout = (callback, delay) => {
+    scheduledDelays.push(delay);
+    const interrupt = duringBackoff;
+    duringBackoff = null;
+    return realSetTimeout(() => { interrupt?.(); callback(); }, 0);
+};
+
 const ctx = {
     chatId: 'A', characterId: 0, characters: [{ avatar: 'test.png' }], chat: [],
-    eventSource: new EventEmitter(), eventTypes: { GENERATION_STARTED: 'start', GENERATION_ENDED: 'end', GENERATION_STOPPED: 'stop', CHAT_COMPLETION_SETTINGS_READY: 'prepared' },
+    eventSource: new EventEmitter(), eventTypes: { GENERATION_STARTED: 'start', GENERATION_ENDED: 'end', GENERATION_STOPPED: 'stop', CHAT_CHANGED: 'changed', CHAT_COMPLETION_SETTINGS_READY: 'prepared' },
     extensionSettings: {}, setExtensionPrompt() {}, saveSettingsDebounced() {},
 };
 globalThis.SillyTavern = { getContext: () => ctx };
@@ -33,7 +43,7 @@ ctx.generateQuietPrompt = async ({ quietPrompt }) => {
     const story = makePayload('normal', quietPrompt, 70000);
     const other = makePayload('quiet', 'another extension', 70000);
     for (const data of [own, smaller, story, other]) ctx.eventSource.emit('prepared', data);
-    assert.equal(own.max_tokens, 4096);
+    assert.equal(own.max_tokens, 70000);
     assert.equal(smaller.max_completion_tokens, 768);
     assert.equal(story.max_tokens, 70000);
     assert.equal(other.max_tokens, 70000);
@@ -44,7 +54,7 @@ ctx.chat.push({ is_user:true, mes:'我和店主谈价钱' });
 start(); await intercept(); ctx.eventSource.emit('end');
 assert.equal(cfg.runLogs[keyA].length, 2, 'the host start and interceptor produce one trace');
 assert.match(lines(), /等待答复/);
-assert.match(lines(), /裁判请求，输出上限 4096/);
+assert.match(lines(), /准备好本次裁判请求/);
 assert.match(lines(), /对方坚持原价/);
 assert.match(lines(), /风险：谈判可能失败/);
 assert.match(lines(), /d100=\d+ \/ 成功阈值30%/);
@@ -59,7 +69,10 @@ ctx.generateQuietPrompt = async () => { attempts++; return 'unstructured respons
 await intercept();
 assert.ok(log().some(s => s.level === 'error' && /没有 JSON/.test(s.text)));
 assert.doesNotMatch(lines(), /本轮无须掷骰|PRIVATE_SAMPLE|d100=/);
-assert.equal(attempts, 1, 'one failed invocation sends only one request');
+assert.equal(attempts, 4, 'first attempt plus exactly three automatic retries');
+assert.deepEqual(scheduledDelays, [1000, 2000, 4000]);
+assert.match(lines(), /第 3\/3 次重试/);
+assert.match(lines(), /已用完 3 次重试/);
 assert.equal(cfg.rolls[keyA], undefined, 'a failure cannot become a cached roll');
 
 // Reload with the exact two layers of failed state written by 1.4.0, plus an old manual lock.
@@ -70,15 +83,32 @@ cfg.queued[keyA] = failed;
 ctx.extensionSettings.fair_dice_winmiu_v1 = cfg;
 ctx.generateQuietPrompt = async () => { attempts++; return JSON.stringify({ kind:'action', shouldRoll:true, difficulty:'hard' }); };
 await intercept('regenerate');
-assert.equal(attempts, 2, 'one genuine retry for the same round after reloading old settings');
+assert.equal(attempts, 5, 'one genuine request for the same round after reloading old settings');
 assert.match(lines(), /上次评估失败，已重新请求/);
 assert.match(lines(), /d100=\d+/);
 assert.equal(cfg.queued[keyA], undefined);
 const recoveredRoll = cfg.rolls[keyA].bundle.check.roll;
 await intercept('regenerate');
-assert.equal(attempts, 2);
+assert.equal(attempts, 5);
 assert.equal(cfg.rolls[keyA].bundle.check.roll, recoveredRoll);
 assert.match(lines(), /沿用同一回合/);
+
+ctx.chat.push({ is_user:true, mes:'两次暂时故障后恢复' });
+let recoveryRequests = 0;
+ctx.generateQuietPrompt = async () => {
+    recoveryRequests++;
+    assert.ok(log().every(step => !step.text.includes('d100=')));
+    if (recoveryRequests === 1) throw Object.assign(new Error('temporary'), {status:503});
+    if (recoveryRequests === 2) return 'not json';
+    return JSON.stringify({kind:'action', shouldRoll:true, difficulty:'normal'});
+};
+await intercept();
+assert.equal(recoveryRequests, 3);
+assert.match(lines(), /第 2\/3 次重试/);
+assert.doesNotMatch(lines(), /第 3\/3 次重试/);
+assert.equal(log().filter(s => s.text.includes('d100=')).length, 1);
+await intercept('regenerate');
+assert.equal(recoveryRequests, 3);
 
 ctx.chat.push({ is_user:true, mes:'下雨了吗' });
 ctx.generateQuietPrompt = async () => JSON.stringify({ kind:'none', shouldRoll:false, evidence:'已有天气设定' });
@@ -89,6 +119,26 @@ ctx.generateQuietPrompt = () => assert.fail('a successful no-roll decision must 
 await intercept('regenerate');
 assert.match(lines(), /本轮无须掷骰/);
 assert.match(lines(), /沿用同一回合/);
+
+ctx.chat.push({ is_user:true, mes:'重试间隔内停止' });
+let interruptedAttempts = 0;
+ctx.generateQuietPrompt = async () => { interruptedAttempts++; throw new Error('request aborted'); };
+duringBackoff = () => ctx.eventSource.emit('stop');
+await intercept();
+assert.equal(interruptedAttempts, 1);
+assert.match(lines(), /酒馆发出了停止生成信号/);
+assert.doesNotMatch(lines(), /第 1\/3 次重试|d100=/);
+
+ctx.chat.push({ is_user:true, mes:'重试间隔内切换聊天再返回' });
+interruptedAttempts = 0;
+duringBackoff = () => {
+    ctx.chatId = 'B'; ctx.eventSource.emit('changed');
+    ctx.chatId = 'A'; ctx.eventSource.emit('changed');
+};
+await intercept();
+assert.equal(interruptedAttempts, 1);
+assert.match(lines(), /未提交本次结果/);
+assert.doesNotMatch(lines(), /第 1\/3 次重试|d100=/);
 
 ctx.chat.push({ is_user:true, mes:'酒馆停止' });
 const beforeStop = ctx.eventSource.listenerCount('stop');
@@ -136,4 +186,27 @@ for (let i = 0; i < 25; i++) beginRun(cfg, keyB, String(i), () => {})('test');
 assert.equal(cfg.runLogs[keyB].length, 20);
 assert.equal(cfg.runLogs[keyB][0].title, '24');
 assert.equal(cfg.runLogs[keyB].at(-1).title, '5');
+
+// Drive the manual action through the same button handler the real panel registers.
+let clickAnalyze;
+const analyze = { addEventListener(type, handler) { if (type === 'click') clickAnalyze = handler; } };
+const logDrawer = { open:false, addEventListener() {} };
+const label = {};
+const controls = { '#fd-analyze':analyze, '#fd-log':logDrawer, '#fd-assessment':label };
+document.getElementById = () => null;
+document.querySelector = () => ({ append() {} });
+document.createElement = () => ({ querySelector:selector => controls[selector] ?? null });
+document.dispatchEvent(new Event('DOMContentLoaded'));
+let manualCalls = 0;
+ctx.generateQuietPrompt = async () => ++manualCalls < 4 ? '' : JSON.stringify({kind:'none', shouldRoll:false});
+await clickAnalyze();
+assert.equal(manualCalls, 4);
+assert.equal(cfg.runLogs[keyB][0].title, '手动评估');
+assert.match(lines(keyB), /第 3\/3 次重试/);
+assert.match(lines(keyB), /手动评估已保存/);
+assert.equal(cfg.rolls[keyB], undefined);
+assert.equal(analyze.disabled, false);
+await intercept();
+assert.equal(manualCalls, 4, 'automatic generation reuses the valid manual decision');
+globalThis.setTimeout = realSetTimeout;
 console.log('Fair Dice run log tests PASSED');
