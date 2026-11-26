@@ -86,3 +86,15 @@
 
 #fair-dice-root .fd-unknown { display:flex; align-items:center; gap:6px; font-size:11px; margin:10px 0; opacity:.86; }
 #fair-dice-root .fd-unknown input { accent-color:var(--fd-accent); }
+#fair-dice-root #fd-log {
+    margin: .55em 0;
+    padding: .4em .65em;
+    border: 1px solid var(--SmartThemeBorderColor, #8888);
+    border-radius: .45em;
+}
+#fair-dice-root #fd-log summary { cursor: pointer; font-weight: 600; }
+#fair-dice-root .fd-log-status { margin: .6em 0; font-size: .9em; }
+#fair-dice-root .fd-log-list { max-height: 22em; overflow: auto; overflow-wrap: anywhere; }
+#fair-dice-root .fd-log-run { border-top: 1px solid var(--SmartThemeBorderColor, #8888); padding: .55em 0; font-size: .9em; }
+#fair-dice-root .fd-log-run div { margin-top: .2em; }
+#fair-dice-root .fd-log-error { font-weight: 650; border-inline-start: .2em solid #cf6b55; padding-inline-start: .5em; }

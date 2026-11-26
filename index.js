@@ -1,6 +1,7 @@
 import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD100, resolveCheck, parseLevel, isValidAssessment } from './engine.js';
+import { beginRun, assessmentText, resultText, errorText } from './run-log.js';
 /**
- * Fair Dice v1.3.1 — independent SillyTavern UI extension with optional GM adjudication.
+ * Fair Dice v1.4.0 — independent SillyTavern UI extension with optional GM adjudication.
  * Native ST prompt interceptor, no remote calls and no character-card mutation.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
@@ -95,6 +96,45 @@ let root = null;
 let listenersAttached = false;
 let normalizedReference = null;
 let refereeBusy = false; // Guard against quiet-generation implementations invoking interceptors recursively.
+const waitingForInterceptor = new Map();
+const generationNames = { normal: '正常生成', regenerate: '重新生成', swipe: '切换候选回复', continue: '继续生成' };
+
+function startLog(cfg, key, title) {
+    return beginRun(cfg, key, title, () => {
+        persist();
+        if (key === chatKey()) renderRunLog();
+    });
+}
+
+function generationStarted(type = 'normal', _options, dryRun) {
+    if (dryRun || refereeBusy || ['quiet', 'impersonate'].includes(type) || !isEnabledHere()) return;
+    const key = chatKey();
+    const previous = waitingForInterceptor.get(key);
+    if (previous) previous.log('下一次生成已开始，上一次没有进入自动判定。', 'notice');
+    const log = startLog(initSettings(), key, generationNames[type] || '酒馆生成');
+    waitingForInterceptor.set(key, { type, log });
+    log('酒馆开始生成，等待进入公平骰子的判定步骤。');
+}
+
+function generationEnded() {
+    const key = chatKey();
+    const pending = waitingForInterceptor.get(key);
+    if (!pending || refereeBusy) return;
+    waitingForInterceptor.delete(key);
+    pending.log('酒馆生成已停止或结束，本次没有进入公平骰子的判定步骤。', 'notice');
+}
+
+function chatChanged() {
+    const current = chatKey();
+    for (const [key, pending] of waitingForInterceptor) {
+        if (key === current) continue;
+        waitingForInterceptor.delete(key);
+        pending.log('已切换聊天，切换前未收到判定回调。', 'notice');
+    }
+    clearInjection();
+    renderRows();
+    updateScope();
+}
 
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
 function context() {
@@ -277,6 +317,7 @@ function drawBundle(cfg, key) {
     return {
         mode,
         skipped,
+        judgeError: guarded ? judgement.error || '' : '',
         rationale: guarded ? judgement.summary : '',
         event: !skipped && mode === 'narrative' && cfg.eventDice && (!guarded || judgement.eventRelevant) ? draw(profile.events) : null,
         reaction: !skipped && mode === 'narrative' && cfg.npcDice && (!guarded || judgement.npcRelevant) ? draw(profile.reactions) : null,
@@ -317,7 +358,8 @@ function useRoll(cfg, key) {
 function buildPrompt(cfg, bundle) {
     const lines = ['[Fair Dice | 内部概率判定；不要作为正文显示]'];
     if (cfg.fairness) lines.push('通用公平原则：玩家与NPC不享有叙事特权。按能力、动机、准备、装备、阶位、人数、伤势与既定事实裁定。不得因为玩家是主角就让敌人降智、自动失败、无理由帮助；也不得恶意刁难玩家。');
-    if (bundle.skipped) lines.push(`独立裁判：本轮没有有意义的不确定行动或自然转场，不要凭空掷骰、强行插入事件或决定NPC突然转变。${cleanText(bundle.rationale,130)}`);
+    if (bundle.judgeError) lines.push('裁判评估未完成，本轮没有骰点；不要编造结果。');
+    else if (bundle.skipped) lines.push(`独立裁判：本轮没有有意义的不确定行动或自然转场，不要凭空掷骰、强行插入事件或决定NPC突然转变。${cleanText(bundle.rationale,130)}`);
     if (bundle.check) {
         const c = bundle.check;
         if (c.kind === 'combat') {
@@ -361,15 +403,15 @@ async function independentGM(cfg, key) {
     const previous = cfg.assessments?.[key];
     const round = roundKey();
     if (previous?.round === round) return previous;
-    if (typeof ctx?.generateQuietPrompt !== 'function') return null;
+    if (typeof ctx?.generateQuietPrompt !== 'function') throw new Error('当前酒馆不支持静默裁判');
     // Clear any previous turn's injected verdict to keep the adjudicator independent.
     clearInjection();
     refereeBusy = true;
     let raw;
     try { raw = await ctx.generateQuietPrompt({ quietPrompt: JUDGE_PROMPT }); }
     finally { refereeBusy = false; }
-    const result = readAssessment(raw);
     if (chatKey() !== key || roundKey() !== round) return null;
+    const result = readAssessment(raw);
     cfg.assessments[key] = result;
     delete cfg.rolls[key];
     persist();
@@ -377,30 +419,68 @@ async function independentGM(cfg, key) {
 }
 
 // Registered from manifest.json. This runs before prompt assembly, never edits the chat array.
-globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize, _abort, type) {
-    if (refereeBusy || ['quiet', 'impersonate'].includes(String(type ?? ''))) return;
+globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize, _abort, type = 'normal') {
+    if (['quiet', 'impersonate'].includes(type)) return;
+    if (refereeBusy) {
+        if (isEnabledHere()) startLog(initSettings(), chatKey(), generationNames[type] || '自动判定')('已有前置裁判请求在等待答复，本次未重复判定。', 'notice');
+        return;
+    }
     if (!isEnabledHere()) { clearInjection(); return; }
+    const cfg = initSettings(), key = chatKey(), round = roundKey();
+    const pending = waitingForInterceptor.get(key);
+    waitingForInterceptor.delete(key);
+    const log = pending?.type === type ? pending.log : startLog(cfg, key, generationNames[type] || '自动判定');
+    let stage = '判定执行';
     try {
-        const cfg = initSettings();
-        const key = chatKey();
-        if (cfg.autoJudge && !cfg.queued[key]) {
-            try { await independentGM(cfg, key); }
-            catch (err) {
-                // Fail closed: no speculative roll when the GM adjudication is unavailable.
-                console.warn('[Fair Dice] 独立裁判失败：改为继续当前情境', err);
-                if (chatKey() === key) {
-                    cfg.assessments[key] = { kind: 'narrative', shouldRoll: false, eventRelevant: false, npcRelevant: false, summary: '裁判调用失败；本轮不作无依据的结果判定', round: roundKey() };
-                    delete cfg.rolls[key]; persist();
+        log('已进入自动判定。');
+        const cached = cfg.rolls[key]?.round === round && cfg.rolls[key]?.bundle;
+        if (cfg.queued[key]) {
+            log('使用已手动锁定的结果。');
+        } else if (cached) {
+            log('沿用同一回合的结果，未重新请求裁判或掷骰。');
+        } else if (cfg.autoJudge) {
+            const previous = cfg.assessments[key];
+            log(previous?.round === round ? '沿用本轮已有的裁判评估。' : '已请求前置 AI 裁判，等待答复。');
+            try {
+                await independentGM(cfg, key);
+            } catch (err) {
+                if (chatKey() === key && roundKey() === round) {
+                    const error = errorText(err);
+                    cfg.assessments[key] = { kind: 'narrative', shouldRoll: false, eventRelevant: false, npcRelevant: false, error, summary: '裁判调用失败：' + error, round };
+                    delete cfg.rolls[key];
+                    persist();
                 }
             }
+        } else {
+            log('前置 AI 裁判已关闭，使用本聊天的模式和本地规则。');
         }
-        // A user may disable this chat or switch roles while the extra GM request is pending.
-        if (!isEnabledHere() || chatKey() !== key) { clearInjection(); return; }
+        if (chatKey() !== key || roundKey() !== round || !isEnabledHere()) {
+            log('聊天、回合或开关已变化，未提交本次结果。', 'notice');
+            return;
+        }
+        const judged = cfg.assessments[key];
+        if (cfg.autoJudge && !cfg.queued[key] && judged?.round === round) {
+            if (judged.error) log('裁判评估失败：' + judged.error, 'error');
+            else log(assessmentText(judged));
+        }
+        stage = '读取或生成骰子结果';
         const bundle = useRoll(cfg, key);
-        writeInjection(buildPrompt(cfg, bundle));
-        updateResult();
+        if (bundle.check) {
+            const { kind, odds } = bundle.check;
+            log(kind === 'combat'
+                ? `战斗条件：行动方战力 ${odds.actorLevel ?? '未知'}，对手战力 ${odds.opponentLevel ?? '未知'}，对手 ${odds.opponentCount} 人，修正 ${odds.modifier}。`
+                : `行动条件：难度「${odds.difficultyName}」，修正 ${odds.modifier}。`);
+        }
+        log(resultText(bundle), bundle.check?.pending ? 'notice' : 'info');
+        stage = '向酒馆提交本轮指引';
+        const prompt = buildPrompt(cfg, bundle);
+        if (!writeInjection(prompt)) log('无法交给主模型：酒馆未提供提示词接口。', 'error');
+        else log(prompt ? '已将本轮指引交给酒馆，供主模型生成回复。' : '本轮没有需要交给主模型的指引。');
+        stage = '刷新面板';
+        updateScope();
     } catch (error) {
-        clearInjection();
+        if (stage !== '刷新面板' && chatKey() === key) clearInjection();
+        log(stage + '失败：' + errorText(error), 'error');
         console.error('[Fair Dice] interception failed', error);
     }
 };
@@ -477,26 +557,35 @@ async function analyzeNow() {
     const c=context(), cfg=initSettings(), key=chatKey();
     const button=root?.querySelector('#fd-analyze');
     const label=root?.querySelector('#fd-assessment');
-    if (!cfg || !key || typeof c?.generateQuietPrompt !== 'function') {
+    if (!cfg || !key) return;
+    const log = startLog(cfg, key, '手动评估');
+    if (typeof c?.generateQuietPrompt !== 'function') {
         if (label) label.textContent='当前接口不支持静默AI评估；可手动填写等级及难度。';
+        log('当前酒馆没有提供静默裁判接口。', 'error');
         return;
     }
+    const round = roundKey();
+    log('已手动请求 AI 评估，等待答复。');
     if (button) button.disabled=true;
     if (label) label.textContent='正在使用当前模型阅读人物设定与场景（额外消耗一次请求）…';
     try {
         const raw=await c.generateQuietPrompt({quietPrompt:JUDGE_PROMPT});
-                const evaluated=readAssessment(raw);
-        if (chatKey() !== key || roundKey() !== evaluated.round) {
-            if (label) label.textContent='聊天或本轮内容已变化，丢弃旧评估。';
+        if (chatKey() !== key || roundKey() !== round) {
+            log('聊天或回合已变化，本次评估未采用。', 'notice');
             return;
         }
+        const evaluated=readAssessment(raw);
         cfg.assessments[key]=evaluated;
         invalidateRoll(cfg);
         persist();
         updateScope();
         if (label) label.textContent=`已评估：${evaluated.kind==='combat'?'战斗':evaluated.kind==='action'?'事件检定':'普通叙事'}。${evaluated.summary || '证据不足'}`;
+        log(assessmentText(evaluated));
+        log('手动评估已保存，尚未掷骰。');
     } catch(e) {
-        if (label) label.textContent=`评估未完成：${cleanText(e?.message,120)}。请手动选择判定类型与等级。`;
+        const reason = '评估未完成：' + errorText(e);
+        log(reason, 'error');
+        if (label && chatKey() === key) label.textContent=reason;
     } finally { if (button) button.disabled=false; }
 }
 function saveManual() {
@@ -615,16 +704,36 @@ function updateResult() {
     if (!drawn) { c.textContent = '尚无抽签。开启后将在下一次正常生成时自动抽取。'; return; }
     const type = queued ? '已锁定下一次回复' : '最近一轮抽签';
     c.append(el('span', 'fd-result-tag', type));
-    const parts=[];
-    if (drawn.skipped) parts.push('独立裁判：本轮无须掷骰，继续当前情境');
-    if (drawn.check) {
-        const check=drawn.check;
-        parts.push(check.pending ? '战斗交锋：尚缺双方战力，已暂缓硬判；请先AI评估或手动填写' : `${check.kind==='combat'?'战斗交锋':'事件检定'}：d100=${check.roll} / 成功阈值${check.chance}%，${check.degree}`);
-        if (check.kind==='combat' && (!check.odds.knownA || !check.odds.knownB)) parts.push('⚠ 双方能力不全，判定仅作低置信度参考；建议点击「AI评估当前场景」');
+    c.append(el('div', 'fd-result-lines', resultText(drawn)));
+}
+function renderRunLog() {
+    const drawer = root?.querySelector('#fd-log');
+    if (!drawer?.open) return;
+    const key = chatKey(), cfg = initSettings();
+    const status = drawer.querySelector('.fd-log-status');
+    const list = drawer.querySelector('.fd-log-list');
+    list.replaceChildren();
+    if (!key || !cfg) { status.textContent = '扩展已加载。打开角色聊天后可查看该聊天的记录。'; return; }
+    const history = cfg.runLogs?.[key];
+    const enabled = extensionActive && cfg.enabledChats[key];
+    status.textContent = '扩展已加载 · ' + (enabled ? '当前聊天已启用' : '当前聊天已关闭') +
+        ' · 前置 AI 裁判' + (cfg.autoJudge ? '已开启' : '已关闭');
+    if (!Array.isArray(history) || !history.length) {
+        list.append(el('p', '', enabled ? '尚无运行记录，等待下一次酒馆生成。' : '尚无运行记录。启用当前聊天后开始记录自动判定。'));
+        return;
     }
-    if (drawn.event) parts.push(`事件：${drawn.event.name}（${drawn.event.pct.toFixed(1)}%）`);
-    if (drawn.reaction) parts.push(`NPC：${drawn.reaction.name}（${drawn.reaction.pct.toFixed(1)}%）`);
-    c.append(el('div', 'fd-result-lines', parts.length ? parts.join(' / ') : '本轮没有需要抽取的项目。'));
+    for (const run of history) {
+        if (!Array.isArray(run?.steps)) continue;
+        const row = el('section', 'fd-log-run');
+        const stamp = new Date(run.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        row.append(el('strong', '', stamp + ' · ' + run.title));
+        for (const step of run.steps) {
+            const prefix = step.level === 'error' ? '错误 · ' : step.level === 'notice' ? '提示 · ' : '';
+            const seconds = Math.max(0, (step.at - run.at) / 1000).toFixed(1);
+            row.append(el('div', step.level === 'error' ? 'fd-log-error' : '', '+' + seconds + 's　' + prefix + step.text));
+        }
+        list.append(row);
+    }
 }
 function updateScope() {
     if (!root) return;
@@ -650,12 +759,13 @@ function updateScope() {
     const combat=root.querySelector('#fd-combat-profile'); if(combat) combat.value=cfg.combatProfile;
     const evaluated=cfg.assessments?.[key];
     const assessmentLabel=root.querySelector('#fd-assessment');
-    if(assessmentLabel) assessmentLabel.textContent=evaluated?.round===roundKey()?`裁判：${evaluated.shouldRoll?'需要掷骰':'不需要掷骰'} · ${evaluated.kind} · ${evaluated.summary||'无明确证据'}${evaluated.stakes?' · '+evaluated.stakes:''}`:'本轮尚未评估。未定等级允许依据可靠事实估算，证据不足时暂缓硬判。';
+    if(assessmentLabel) assessmentLabel.textContent=evaluated?.round===roundKey() ? (evaluated.error ? '裁判评估失败：'+evaluated.error : assessmentText(evaluated)) : '本轮尚未评估。未定等级允许依据可靠事实估算，证据不足时暂缓硬判。';
     for (const id of ['fairness', 'autoJudge', 'eventDice', 'npcDice', 'actionDice', 'combatDice', 'allowUnknownCombat']) {
         const inp = root.querySelector(`#fd-${id}`);
         if (inp) inp.checked = Boolean(cfg[id]);
     }
     updateResult();
+    renderRunLog();
 }
 function addRow(kind) {
     const cfg = initSettings();
@@ -682,6 +792,7 @@ function changeSetting(key, bool) {
     if (!cfg.fairness && !cfg.eventDice && !cfg.npcDice && !cfg.actionDice && !cfg.combatDice) clearInjection();
     persist();
     updateResult();
+    renderRunLog();
 }
 function queueDice() {
     const cfg = initSettings();
@@ -690,11 +801,13 @@ function queueDice() {
     const roll = drawBundle(cfg, key);
     cfg.queued[key] = roll;
     delete cfg.rolls[key];
+    startLog(cfg, key, '手动锁定')('已为下一次回复锁定结果。' + resultText(roll));
     persist(); updateResult();
 }
 function removeQueued() {
     const cfg = initSettings(); const key = chatKey();
     if (!cfg || !key) return;
+    if (cfg.queued[key]) startLog(cfg, key, '取消锁定')('已撤销为下一次回复锁定的结果。');
     delete cfg.queued[key]; persist(); updateResult();
 }
 function buildUI() {
@@ -707,10 +820,11 @@ function buildUI() {
     root = el('section', 'fd-root'); root.id = 'fair-dice-root';
     root.innerHTML = `
       <details class="fd-shell">
-        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.3</small></span><span class="fd-fold">⌄</span></summary>
+        <summary class="fd-title"><span class="fd-symbol">🎲</span><span>公平骰子 <small>Fair Dice · v1.4</small></span><span class="fd-fold">⌄</span></summary>
         <div class="fd-content">
           <div class="fd-intro">独立作用于<strong>当前聊天</strong>，不改角色卡／世界书／MVU。可选前置AI裁判：先给出简短裁定→程序掷骰→主模型叙事。</div>
           <div class="fd-onbar"><div><b>当前聊天启用</b><div id="fd-scope" class="fd-sub">尚未选择聊天</div></div><label class="fd-switch"><input id="fd-enabled" type="checkbox" /><span></span></label></div>
+          <details id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><div class="fd-log-list"></div></details>
           <div class="fd-options">
             <label><input id="fd-fairness" type="checkbox" /> 公平判定：不无理由偏袒玩家</label>
             <label><input id="fd-autoJudge" type="checkbox" /> 前置AI裁判（推荐）：先决定是否需要骰子，另耗一次模型请求</label>
@@ -746,10 +860,12 @@ function buildUI() {
         </div>
       </details>`;
     host.append(root);
+    root.querySelector('#fd-log').addEventListener('toggle', renderRunLog);
     root.querySelector('#fd-enabled')?.addEventListener('change', e => {
         const cfg = initSettings(), key = chatKey();
         if (!cfg || !key) return;
         cfg.enabledChats[key] = e.target.checked;
+        startLog(cfg, key, '聊天开关')(e.target.checked ? '已启用，等待下一次正常生成。' : '已关闭本聊天的自动判定。');
         delete cfg.rolls[key];
         if (!e.target.checked) { delete cfg.queued[key]; clearInjection(); }
         persist(); updateScope();
@@ -783,7 +899,7 @@ function init() {
     if (!listenersAttached && c.eventSource?.on) {
         listenersAttached = true;
         const types = c.eventTypes || c.event_types || {};
-        if (types.CHAT_CHANGED) c.eventSource.on(types.CHAT_CHANGED, () => { clearInjection(); renderRows(); updateScope(); });
+        if (types.CHAT_CHANGED) c.eventSource.on(types.CHAT_CHANGED, chatChanged);
         if (types.CHAT_CREATED) c.eventSource.on(types.CHAT_CREATED, () => { renderRows(); updateScope(); });
         if (types.SETTINGS_UPDATED) c.eventSource.on(types.SETTINGS_UPDATED, () => { updateScope(); updatePercentages(); });
     }
@@ -793,7 +909,11 @@ export function onActivate() {
     const c = context();
     if (activationRegistered || !c?.eventSource?.on) return;
     activationRegistered = true;
-    const ready = c.eventTypes?.APP_READY ?? c.event_types?.APP_READY;
+    const types = c.eventTypes || c.event_types || {};
+    if (types.GENERATION_STARTED) c.eventSource.on(types.GENERATION_STARTED, generationStarted);
+    if (types.GENERATION_STOPPED) c.eventSource.on(types.GENERATION_STOPPED, generationEnded);
+    if (types.GENERATION_ENDED) c.eventSource.on(types.GENERATION_ENDED, generationEnded);
+    const ready = types.APP_READY;
     if (ready) c.eventSource.on(ready, init);
     // APP_READY might already have fired when an extension is enabled later.
     if (document.readyState !== 'loading') init();
