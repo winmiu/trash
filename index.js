@@ -2,9 +2,10 @@ import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD1
 import { beginRun, assessmentText, resultText, errorText, RefereeStopped } from './run-log.js';
 import { requestReferee } from './referee-request.js';
 import { apiAddress, independentConnection, refereeKey } from './referee-api.js';
-import { storyPool, poolResult, storyPrompt, storyActions, confirmStory, readReceipt } from './story-turn.js';
+import { storyPool, poolResult, storyPrompt, confirmStory, readReceipt } from './story-turn.js';
+import { sceneChecks } from './scene-check.js';
 /**
- * Fair Dice v1.7.0 — SillyTavern dice and scene-aware weights.
+ * Fair Dice v1.8.0 — SillyTavern dice and scene-aware checks.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
 const MODULE_KEY = 'fair_dice_winmiu_v1';
@@ -462,16 +463,17 @@ function prepareStory(cfg, key, round, log) {
         cfg.combatProfile, cfg.allowUnknownCombat, cfg.fairness, cfg.eventDice, cfg.npcDice, cfg.actionDice, cfg.combatDice,
         profile.events, profile.reactions]));
     let turn = cfg.storyTurns[key];
-    if (!turn || turn.signature !== signature) {
-        const dice = rollD100(rand01);
+    if (!turn || turn.signature !== signature || (!turn.checks && !turn.confirmed)) {
+        const legacy = turn?.signature === signature ? turn : null;
+        const dice = legacy?.actions?.[0]?.roll ?? legacy?.combat?.roll ?? rollD100(rand01);
         const allowed = kind => mode === 'auto' || kind === mode;
         turn = {
             signature, round, token:Array.from({length:2},()=>Math.floor(rand01()*4294967296).toString(16).padStart(8,'0')).join(''),
             fairness:cfg.fairness, mode,
-            events:storyPool(cfg.eventDice && allowed('narrative') ? profile.events : [], 'E', rand01),
-            reactions:storyPool(cfg.npcDice && allowed('narrative') ? profile.reactions : [], 'N', rand01),
-            actions:cfg.actionDice && allowed('action') ? storyActions(manual, dice) : [],
-            combat:cfg.combatDice && allowed('combat') ? prepareCheck(cfg,key,'combat',dice) : null,
+            events:legacy?.events ?? storyPool(cfg.eventDice && allowed('narrative') ? profile.events : [], 'E', rand01),
+            reactions:legacy?.reactions ?? storyPool(cfg.npcDice && allowed('narrative') ? profile.reactions : [], 'N', rand01),
+            checks:sceneChecks(manual, dice, { action:cfg.actionDice && allowed('action'), combat:cfg.combatDice && allowed('combat'),
+                profile:cfg.combatProfile, allowUnknown:cfg.allowUnknownCombat }),
         };
         delete cfg.storyTurns[key];
         cfg.storyTurns[key] = turn;
@@ -523,7 +525,7 @@ function storyReceived(id, type) {
     if (!confirmed) {
         delete pending.turn.confirmed;
         pending.turn.unconfirmed = true;
-        pending.log('正文判定未确认（记录缺失、格式无效或抽签编号不符）。保留正文，本轮未追加模型请求。', 'notice');
+        pending.log('正文判定未确认（记录缺失、条件无效，或所报结果与本机骰不符）。保留正文，本轮未追加模型请求。', 'notice');
     } else {
         pending.turn.confirmed = confirmed;
         delete pending.turn.unconfirmed;
@@ -531,7 +533,9 @@ function storyReceived(id, type) {
         const adjusted = [pending.turn.events, pending.turn.reactions].flatMap(pool =>
             poolResult(pool, confirmed.up, confirmed.down).rows.filter(r=>r.factor !== 1)
                 .map(r=>r.name + ' ×' + r.factor + '（' + r.pct.toFixed(1) + '%）'));
-        pending.log(adjusted.length ? '本轮自适应：' + adjusted.join('、') : '本轮采用基础权重，系数均为 1。');
+        if (adjusted.length || confirmed.event || confirmed.reaction) {
+            pending.log(adjusted.length ? '本轮自适应：' + adjusted.join('、') : '本轮采用基础权重，系数均为 1。');
+        }
     }
     rememberStory(pending.turn, msg.mes, confirmed);
     persist(); updateScope();
@@ -1046,10 +1050,10 @@ function buildUI() {
               <label><input id="fd-combatDice" type="checkbox" /> 战斗检定</label>
             </div>
             <label class="fd-select">战斗规则<select id="fd-combat-profile"><option value="auto">适配世界观</option><option value="urban">现代现实</option><option value="neutral">标准</option><option value="strict">严格阶位</option><option value="cinematic">戏剧波动</option></select></label>
-            <label class="fd-unknown"><input id="fd-allowUnknownCombat" type="checkbox" /> 战力未知时也允许检定</label>
+            <label class="fd-unknown"><input id="fd-allowUnknownCombat" type="checkbox" /> 战力依据不足时也允许中性估算</label>
           </details>
           <details class="fd-drawer fd-judge"><summary>手动判定</summary>
-            <p class="fd-help">仅用于当前聊天。正文内判定遇到未知战力时，默认暂缓胜负。</p>
+            <p class="fd-help">战力可留空。正文内判定会根据人设、对手和现场条件比较本次交锋。</p>
             <label class="fd-select">判定模式<select id="fd-mode"><option value="auto">自动识别</option><option value="narrative">事件走向</option><option value="action">行动检定</option><option value="combat">战斗检定</option></select></label>
             <div class="fd-fields">
               <label>行动方战力<input id="fd-actor" type="number" min="0" max="100" placeholder="0–100" /></label>
@@ -1070,7 +1074,7 @@ function buildUI() {
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v1.7.0</span> winmiu</small>
+            <small class="fd-signature"><span>v1.8.0</span> winmiu</small>
           </footer>
         </div>
       </details>`;

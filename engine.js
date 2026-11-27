@@ -47,12 +47,12 @@ export function detectKind(userText = '', assistantText = '') {
     if (/^(继续|再来一次|乘胜追击|防守|撤退|反击|继续战斗)[。.!！\s]*$/.test(text.trim()) && battle.test(support)) return 'combat';
     return 'narrative';
 }
-export function combatOdds({ actorLevel = null, opponentLevel = null, opponentCount = 1, modifier = 0, profile = COMBAT_PROFILES.neutral } = {}) {
+export function combatOdds({ actorLevel = null, opponentLevel = null, opponentCount = 1, modifier = 0, profile = COMBAT_PROFILES.neutral, relativeBase = null } = {}) {
     const a = parseLevel(actorLevel), b = parseLevel(opponentLevel);
     const knownA = a !== null, knownB = b !== null;
     const group = clamp(Math.round(Number(opponentCount) || 1), 1, 100);
     const mod = clamp(Number(modifier) || 0, -35, 35);
-    let probability = 50 + mod;
+    let probability = (knownA && knownB ? 50 : (relativeBase ?? 50)) + mod;
     let diff = null;
     if (knownA && knownB) {
         diff = tierIndex(a) - tierIndex(b);
@@ -72,7 +72,8 @@ export function combatOdds({ actorLevel = null, opponentLevel = null, opponentCo
     else if (group >= 5) probability = Math.min(probability, 22);
     else if (group >= 3) probability = Math.min(probability, 40);
     const cap = clamp(Math.round(probability), 1, 99);
-    return { probability: cap, knownA, knownB, actorLevel: a, opponentLevel: b, tierGap: diff, opponentCount: group, modifier: mod, certainty: knownA && knownB ? '基于给定能力值' : '能力资料不足，临时中立基准（仅供测试）' };
+    const certainty = knownA && knownB ? '基于给定能力值' : relativeBase !== null ? '基于本次相对优势' : '能力资料不足，临时中立基准（仅供测试）';
+    return { probability: cap, knownA, knownB, actorLevel: a, opponentLevel: b, tierGap: diff, opponentCount: group, modifier: mod, certainty };
 }
 export function actionOdds({ difficulty = 'normal', modifier = 0, impossible = false } = {}) {
     const key = Object.hasOwn(DIFFICULTY, difficulty) ? difficulty : 'normal';
