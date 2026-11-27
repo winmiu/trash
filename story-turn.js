@@ -18,40 +18,33 @@ export function storyPool(rows, prefix, random) {
 }
 
 
-function describe(pool, title) {
-    if (!pool.items.length) return '';
-    const names = pool.items.map(row => row.code + '=' + row.name + '×' + row.weight + (row.note ? '（' + row.note + '）' : ''));
-    return title + '：' + names.join('、') + '\n候选顺序：' + pool.order.join(' ');
+function describe(pool, omittedNotes, judge) {
+    const rank = new Map(pool.order.map((code, i) => [code, i + 1]));
+    return pool.items.map(row => {
+        const note = row.note && !omittedNotes?.has(row.note) ? '（' + row.note + '）' : '';
+        return row.code + '=' + row.name + note + (judge ? '' : '[' + ['+', '', '-'].map(s => rank.get(s + row.code)).join('/') + ']');
+    }).join(' ');
 }
 
-export function storyPrompt(turn) {
-    if (turn.verdict?.length) {
-        return ['[公平骰 · 本楼已确认裁定]', ...turn.verdict, '沿用本楼裁定。由主预设决定具体后果，只写正文。续写时承接已发生的事。', '[/公平骰]'].join('\n');
-    }
+export function storyPrompt(turn, omittedNotes, judge = false) {
+    if (turn.verdict?.length && !judge) return '【公平骰·本楼裁定】' + turn.verdict.join(' ') + ' 依此接写，后果与格式由主预设决定。';
     const lines = [
-        '[公平骰 · 当前正文输入]',
-        '结合角色卡、世界设定、本轮输入和最新剧情，先找出仍未确定的问题。闲聊、意图和既定事实直接承接。实际对抗走交锋，其他已尝试的未决目标走行动。公平对待各方，同一问题只判一次，保留玩家选择。',
-        '行动与交锋只定本次成败。具体后果、严重程度和后续情节全部由主预设决定。',
-        checkInstructions(turn.die),
+        '【公平骰】按人设、设定与当前情境判一次：闲聊/既定事实略过；行动看任务门槛及专长工具，交锋按目标比较双方能力、状态和实际人数，无数值用已知表现，依据不足暂缓。只判成败，后果交主预设。',
+        judge ? '行难度：很容易/容易/一般/困难/极难/客观不可能。战世界：现实/一般/严格阶位；强弱：明显劣势/劣势/相当/优势/明显优势。临场：不利/中性/有利。' : checkInstructions(turn.die),
     ];
-    if (turn.events.items.length) {
-        lines.push('事件走向：自然转场且走向未定时，按时间、地点及未完事务选；合宜时直接延续。', describe(turn.events, '事件'));
-    }
-    if (turn.reactions.items.length) {
-        lines.push('NPC 反应：人物有未决选择时，按动机、关系、承诺及眼前代价选。', describe(turn.reactions, 'NPC 反应'));
-    }
+    if (turn.events.items.length) lines.push('事：自然转场按时地、未完事务。' + describe(turn.events, omittedNotes, judge));
+    if (turn.reactions.items.length) lines.push('人：未决NPC选择按动机、关系和代价。' + describe(turn.reactions, omittedNotes, judge));
     if (turn.events.items.length || turn.reactions.items.length) {
-        lines.push('各组每轮重评：矛盾项 ! 排除，合适 + 权重×2，较不合适 - ×0.5，其余无符号×1。取顺序中首个符号匹配的编号，全排除则跳过。同一成败的后果不再抽签。');
+        lines.push((judge ? '事或人|调整|*|事实。' : '每项取[合适/平常/不合适]名次，各组选名次最小者；事或人|调整|选中编号(全排除填0)|事实。') + '调整写+编号/-编号/!编号（加倍/减半/排除），其余原权重，空填0。');
     }
-    lines.push('先写一行 <!--FD-' + turn.token + ' 裁定 --> 再按主预设写正文。用下列适用格式替换“裁定”，独立事项用分号分开。依据仅一句已知事实，可引用双方已知能力、状态，不写后果或推演。');
-    lines.push('行|难度|不利/中性/有利|成/败|依据 或 战|现实/一般/严格阶位|强弱档|不利/中性/有利|人数|成/败|依据；无需判定用 略|依据，资料不足用 缓|依据。各字段只选一项。');
-    if (turn.events.items.length || turn.reactions.items.length) {
-        lines.push('事件用 事|调整|选中编号|依据，NPC 用 人|调整|选中编号|依据。调整仅列变化编号，如 +E1 -E2 !E3（! 排除），空变化填 0。全排除时选中编号填 0。');
-    }
-    return lines.filter(Boolean).concat('[/公平骰]').join('\n');
+    const result = judge ? '*' : '成/败';
+    lines.push('行|难度|不利/中性/有利|' + result + '|事实；战|世界|强弱|临场|对手人数|' + result + '|事实；略或缓|事实。只填适用项，依据一句。');
+    lines.push(judge ? '只交裁定行，独立项用分号。不要故事。' :
+        '依预设写正文，附一行 <!--FD-' + turn.token + ' 裁定行 -->，可放末尾。');
+    return lines.join('\n');
 }
 
-function poolVerdict(pool, fields) {
+function poolVerdict(pool, fields, resolveLocally) {
     const [kind, changes, pick, fact] = fields;
     if (!pool.items.length || fields.length !== 4) return null;
     const factors = new Map(pool.items.map(item => [item.code, '']));
@@ -70,11 +63,11 @@ function poolVerdict(pool, fields) {
         if (sign) adjusted.push(item.name + ({'+':'×2','-':'×0.5','!':'排除'})[sign]);
     }
     const chosen = eligible.get(pool.order.find(ticket => eligible.has(ticket)));
-    if (pick !== (chosen?.code ?? '0')) return null;
+    if (!(resolveLocally && pick === '*') && pick !== (chosen?.code ?? '0')) return null;
     return (kind === '事' ? '事件' : 'NPC 反应') + ' · ' + fact + '。' + (chosen?.name ?? '全部排除，跳过') + '。' + (adjusted.join('、') || '沿用基础权重') + '。';
 }
 
-export function confirmVerdict(turn, record) {
+export function confirmVerdict(turn, record, resolveLocally = false) {
     if (!record || record.length > 1400) return null;
     const rows = record.split(/[；;\n]+/).map(row => row.trim()).filter(Boolean);
     if (!rows.length || rows.length > 4) return null;
@@ -89,8 +82,8 @@ export function confirmVerdict(turn, record) {
         if (used.has(branch)) return null;
         used.add(branch);
         let summary;
-        if (branch === '检定') summary = checkVerdict(fields, turn.die);
-        if (kind === '事' || kind === '人') summary = poolVerdict(kind === '事' ? turn.events : turn.reactions, fields);
+        if (branch === '检定') summary = checkVerdict(fields, turn.die, resolveLocally);
+        if (kind === '事' || kind === '人') summary = poolVerdict(kind === '事' ? turn.events : turn.reactions, fields, resolveLocally);
         if (fields.length === 2 && (kind === '缓' || (kind === '略' && rows.length === 1))) {
             summary = (kind === '略' ? '本轮无需判定' : '暂缓判定') + ' · ' + fact + '。';
         }

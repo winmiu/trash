@@ -4,7 +4,7 @@ const RELATIVE = { '明显劣势':15, '劣势':35, '相当':50, '优势':65, '�
 const WORLDS = { urban:'现实', neutral:'一般', strict:'严格阶位' };
 const ADJUSTMENTS = [-15, 0, 15];
 
-export function checkVerdict(fields, die) {
+export function checkVerdict(fields, die, resolveLocally = false) {
     const [kind, ...args] = fields;
     const combat = kind === '战';
     if (args.length !== (combat ? 6 : 4)) return null;
@@ -24,40 +24,17 @@ export function checkVerdict(fields, die) {
         conditions = base;
     }
     const success = die <= chance;
-    if (result !== (success ? '成' : '败')) return null;
+    if (!(resolveLocally && result === '*') && result !== (success ? '成' : '败')) return null;
     return (combat ? '交锋' : '行动') + ' · ' + fact + '。' + conditions + '，' + state + '（' + (modifier > 0 ? '+' : '') + modifier + '）。d100=' + die + ' / 阈值 ' + chance + '%，' + (success ? '成功' : '失败') + '。';
 }
 
-// With fixed abilities and conditions, facing more opponents cannot improve the odds.
-function maxWinningCount(die, relativeBase, modifier, profile) {
-    let low = 0, high = 100;
-    while (low < high) {
-        const count = Math.ceil((low + high) / 2);
-        const { probability } = combatOdds({relativeBase, modifier, profile, opponentCount:count});
-        if (die <= probability) low = count;
-        else high = count - 1;
-    }
-    return low;
-}
-
 export function checkInstructions(die) {
-    const action = Object.entries(DIFFICULTY).map(([difficulty, entry]) => {
-        const cells = ADJUSTMENTS.map(modifier => die <= actionOdds({difficulty, modifier}).probability ? '成' : '败');
-        return entry.name + '=' + cells.join('/');
+    // Collapse the entire action table into the hardest success for each situation.
+    const difficulties = Object.entries(DIFFICULTY);
+    const limits = ADJUSTMENTS.map(modifier => {
+        const last = difficulties.filter(([difficulty]) => die <= actionOdds({difficulty, modifier}).probability).at(-1);
+        return last?.[1].name ?? '无';
     });
-    const tables = new Map();
-    for (const [world, label] of Object.entries(WORLDS)) {
-        const table = Object.entries(RELATIVE).map(([band, base]) => {
-            const counts = ADJUSTMENTS.map(mod => maxWinningCount(die, base, mod, COMBAT_PROFILES[world]));
-            return band + '=' + counts.join('/');
-        }).join('，');
-        tables.set(table, [...(tables.get(table) || []), label]);
-    }
-    return [
-        '本轮预掷 d100=' + die + '。先依事实选档再查表，不能按想要的结果倒选。每项三格依次为临场不利／中性／有利，同一事实只计算一次。',
-        '行动：先按任务本身的门槛选难度，再用此人的相关专长、准备、工具及疲劳选临场格。必需前提明确缺失时遵守限制；关键事实未知且会改变结论时，只写眼下可确定的进展。成＝本次尝试成功，败＝本次尝试失败。' + action.join('，'),
-        '交锋：先定这一合争什么，按世界规则选表。比较与该目标有关的双方能力：有可比数值或阶位就用；没有数值就用人设、训练和已展示的表现选相对强弱档。按伤势、地利等选临场格，只计实际参与的对手。实力相当须有依据；关键信息不足时暂缓胜负，不编造战力。',
-        '交锋表中的数是该格仍可成功的最多对手人数。实际人数在上限以内成功，超过上限失败；0 始终失败，100 表示达到表的上限（百人以上按 100 计）。',
-        ...[...tables].map(([table, labels])=>labels.join('/') + '：' + table),
-    ].join('\n');
+    return 'd100=' + die + '。行：很容易/容易/一般/困难/极难，不利/中性/有利下最多成功到' + limits.join('/') +
+        '；客观不可能必败。战：明显劣势/劣势/相当/优势/明显优势基值15/35/50/65/85，加临场-15/0/15。每多1人按现实/一般/严格阶位扣17/13/19，最多扣75。3/5/10/50人起封顶40/22/7/1，最后限1～99，骰≤阈值成。';
 }

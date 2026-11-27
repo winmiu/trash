@@ -1,6 +1,8 @@
 import { rollD100 } from './engine.js';
 import { beginRun } from './run-log.js';
 import { confirmVerdict, readRecord, storyPool, storyPrompt } from './story-turn.js';
+import { placeInChat, presentIn } from './delivery.js';
+import { judgeFloor, supportedProfiles } from './profile-judge.js';
 
 const MODULE_KEY = 'fair_dice_winmiu_v1';
 const PROMPT_KEY = 'fair_dice_winmiu_injection_v1';
@@ -71,6 +73,9 @@ let activationRegistered = false;
 let normalizedReference = null;
 let injectedChat = null;
 let pendingVerdict = null;
+let delivery = null;
+let judgeJob = null;
+const standardNotes = new Set(Object.values(BUILT_INS).flatMap(p => [...p.events, ...p.reactions].map(row => row[2])));
 const generationNames = { normal:'正常生成', regenerate:'重新生成', swipe:'切换候选回复', continue:'继续生成' };
 
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
@@ -162,6 +167,7 @@ function isEnabledHere() {
 
 
 function clearInjection() {
+    delivery = null;
     const ctx = context();
     if (!ctx) return;
     if (injectedChat === null && !Object.hasOwn(ctx.extensionPrompts || {}, PROMPT_KEY)) return;
@@ -172,6 +178,7 @@ function clearInjection() {
 }
 
 function chatChanged() {
+    judgeJob?.abort();
     finishPending();
     clearInjection();
     renderRows();
@@ -266,11 +273,11 @@ function floorTurn(ctx, cfg, key, reroll = false) {
 
 function updateRerollButton() {
     const button = root?.querySelector('#fd-reroll');
-    if (button) button.disabled = !isEnabledHere() || injectedChat !== null || !!pendingVerdict;
+    if (button) button.disabled = !isEnabledHere() || injectedChat !== null || !!pendingVerdict || !!judgeJob;
 }
 
 async function rerollFloor() {
-    if (!isEnabledHere() || injectedChat !== null || pendingVerdict) return;
+    if (!isEnabledHere() || injectedChat !== null || pendingVerdict || judgeJob) return;
     const ctx = context(), cfg = initSettings(), key = chatKey();
     const log = beginRun(cfg, key, '手动重掷', () => { persist(); renderRunLog(); });
     try {
@@ -336,8 +343,11 @@ function receiveVerdict(id, type) {
 }
 
 // SillyTavern reads this one named prompt while assembling its own generation request.
-globalThis.FairDiceIndependentInterceptor = function (_chat, _contextSize, _abort, type = 'normal') {
+globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize, abort, type = 'normal') {
     if (!Object.hasOwn(generationNames, type) || !isEnabledHere()) { clearInjection(); return; }
+    if (judgeJob) { abort(true); return; }
+    finishPending();
+    clearInjection();
     const ctx = context(), cfg = initSettings(), key = chatKey();
     const log = beginRun(cfg, key, generationNames[type] + ' · 一次性注入', () => { persist(); renderRunLog(); });
     try {
@@ -346,15 +356,41 @@ globalThis.FairDiceIndependentInterceptor = function (_chat, _contextSize, _abor
             return;
         }
         const {turn, label, source} = floorTurn(ctx, cfg, key);
-        const prompt = storyPrompt(turn);
+        let judged = false;
+        if (cfg.judgeProfileId && !turn.verdict) {
+            const controller = new AbortController();
+            judgeJob = controller;
+            updateRerollButton();
+            const timeout = setTimeout(() => controller.abort('timeout'), 60000);
+            try {
+                const verdict = await judgeFloor(ctx, cfg.judgeProfileId, turn, standardNotes, controller.signal);
+                if (controller.signal.aborted || key !== chatKey() || !isEnabledHere() || currentFloor(ctx,cfg,key).owner[FLOOR_FIELD] !== turn) { abort(true); return; }
+                turn.verdict = verdict;
+                ctx.saveMetadataDebounced?.();
+                judged = true;
+            } catch (error) {
+                if (controller.signal.aborted && controller.signal.reason !== 'timeout') { abort(true); return; }
+                const detail = ['所选酒馆连接不可用','独立裁判的记录未通过骰表校验'].includes(error?.message) || error?.message?.startsWith('此自定义地址') ? error.message : '请检查所选连接和模型';
+                log('独立裁判' + (controller.signal.reason === 'timeout' ? '超时' : '未完成') + '，本轮正文照常生成，本楼骰点保留。' + detail, 'error');
+                return;
+            } finally {
+                clearTimeout(timeout);
+                if (judgeJob === controller) judgeJob = null;
+                updateRerollButton();
+            }
+        }
+        const prompt = storyPrompt(turn, standardNotes);
         finishPending();
         if (!turn.verdict) pendingVerdict = {turn, key, log};
         injectedChat = key;
-        ctx.setExtensionPrompt(PROMPT_KEY, prompt, IN_CHAT, EVENT_DEPTH, false, SYSTEM_ROLE,
+        const nativeChat = ctx.mainApi === 'openai' && !!(ctx.eventTypes ?? ctx.event_types)?.GENERATE_AFTER_DATA;
+        delivery = {prompt, token:turn.token, key, type, log, nativeChat};
+        const slot = nativeChat ? '[fd:' + turn.token + ']' + prompt + '[/fd:' + turn.token + ']' : prompt;
+        ctx.setExtensionPrompt(PROMPT_KEY, slot, IN_CHAT, EVENT_DEPTH, false, SYSTEM_ROLE,
             () => injectedChat === key && chatKey() === key && isEnabledHere());
         updateRerollButton();
         log(label + ' · ' + source + '第 ' + turn.revision + ' 组 · d100=' + turn.die + '。');
-        log((turn.verdict ? '已注入正文输入 · 沿用本楼已确认裁定。' : '已注入正文输入 · 等待同一条正文回复中的简短裁定。') + '公平骰模型请求 0 次。', 'info', prompt);
+        log((turn.verdict ? '已准备本楼已确认裁定。' : '已准备同次裁定。') + prompt.length + ' 字符，公平骰模型请求 ' + (judged ? 1 : 0) + ' 次。', 'info', prompt);
         if (turn.verdict) for (const line of turn.verdict) log(line);
     } catch {
         finishPending();
@@ -362,6 +398,29 @@ globalThis.FairDiceIndependentInterceptor = function (_chat, _contextSize, _abor
         log('准备或写入正文输入失败，请检查酒馆版本。', 'error');
     }
 };
+
+function afterData(data, dryRun) {
+    const d = delivery;
+    if (!d || dryRun || d.assembled || d.key !== chatKey() || !isEnabledHere()) return;
+    if (d.nativeChat && Array.isArray(data?.prompt)) {
+        try { data.prompt = placeInChat(data.prompt, d.prompt, d.token); }
+        catch { d.log('酒馆组装时改变了公平骰文本，沿用原请求并检查发送内容。', 'notice'); }
+        d.messages = data.prompt;
+    } else if (typeof data?.prompt === 'string' || typeof data?.input === 'string') {
+        const text = typeof data.prompt === 'string' ? data.prompt : data.input;
+        d.log(text.includes(d.prompt) ? '已在组装好的文本请求中核对到公平骰。' : '已组装文本请求，未找到完整的公平骰提示。', text.includes(d.prompt) ? 'info' : 'notice');
+    } else return;
+    d.assembled = true;
+}
+
+function checkOutgoing(data) {
+    const d = delivery;
+    if (!d?.messages || d.checked || data?.type !== d.type || d.key !== chatKey()) return;
+    const present = presentIn(data.messages, d.prompt);
+    if (!present && data.messages !== d.messages) return;
+    d.checked = true;
+    d.log(present ? '已在酒馆发往接口的正文请求中核对到公平骰。' : '正文请求发出前未找到完整的公平骰提示。', present ? 'info' : 'notice');
+}
 
 function customize(cfg) {
     const profile = profileFor(cfg);
@@ -504,7 +563,7 @@ function renderRunLog() {
         const input = cfg.runInputs?.[key]?.[run.inputId];
         if (typeof input === 'string') {
             const details = el('details', 'fd-log-input');
-            details.append(el('summary', '', '查看本次实际注入的内容'), el('pre', '', input));
+            details.append(el('summary', '', '查看本楼准备的提示'), el('pre', '', input));
             row.append(details);
         }
         list.append(row);
@@ -519,6 +578,13 @@ function updateScope() {
     toggle.disabled = !key;
     toggle.checked = isEnabledHere();
     updateRerollButton();
+    const select = root.querySelector('#fd-judge-profile');
+    const saved = initSettings()?.judgeProfileId || '';
+    const options = [new Option('正文一次判定（默认）', '')];
+    for (const p of supportedProfiles(context())) options.push(new Option(p.name, p.id));
+    if (saved && !options.some(option => option.value === saved)) options.push(new Option('已选连接不可用', saved));
+    select.replaceChildren(...options);
+    select.value = saved;
     root.querySelector('#fd-scope').textContent = key ? '随角色卡和当前剧情判定 · 一次注入正文输入' : '请先打开一个聊天。';
     renderRunLog();
 }
@@ -559,6 +625,11 @@ function buildUI() {
 
           <details class="fd-drawer" id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><button id="fd-reroll" class="fd-btn" type="button">重新摇骰子</button><p class="fd-help">只重掷本楼。可先删除 AI 回复，保留玩家消息，再重掷并生成。</p><div class="fd-log-list"></div></details>
 
+          <details class="fd-drawer" id="fd-connection"><summary>裁判连接</summary>
+            <div class="fd-presets"><label for="fd-judge-profile">酒馆连接</label><select id="fd-judge-profile"></select></div>
+            <p class="fd-help">默认和正文同次判定。选择已保存的聊天补全连接后，新楼会将角色资料和最近对话发给该裁判，再把结果交给正文。同楼复用裁定。</p>
+          </details>
+
           <details class="fd-drawer"><summary>事件与反应权重</summary>
             <div class="fd-presets"><label for="fd-preset">本聊天预设</label><select id="fd-preset"><option value="balanced">公平中立</option><option value="slice">生活日常</option><option value="dynamic">变化较多</option><option value="custom">自定义</option></select></div>
             <p class="fd-help">基础权重的修改在新楼或手动重掷时生效。正文生成时按剧情调整。</p>
@@ -567,7 +638,7 @@ function buildUI() {
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v2.0.0</span> winmiu</small>
+            <small class="fd-signature"><span>v2.1.0</span> winmiu</small>
           </footer>
         </div>
       </details>`;
@@ -575,11 +646,17 @@ function buildUI() {
     host.append(root);
     root.querySelector('#fd-log').addEventListener('toggle', renderRunLog);
     root.querySelector('#fd-reroll').addEventListener('click', rerollFloor);
+    root.querySelector('#fd-connection').addEventListener('toggle', e => { if (e.target.open) updateScope(); });
+    root.querySelector('#fd-judge-profile').addEventListener('change', e => {
+        judgeJob?.abort();
+        initSettings().judgeProfileId = e.target.value;
+        persist();
+    });
     root.querySelector('#fd-enabled').addEventListener('change', e => {
         const cfg = initSettings(), key = chatKey();
         if (!cfg || !key) return;
         cfg.enabledChats[key] = e.target.checked;
-        if (!e.target.checked) { finishPending(); clearInjection(); }
+        if (!e.target.checked) { judgeJob?.abort(); finishPending(); clearInjection(); }
         persist(); updateScope();
     });
     root.querySelector('#fd-preset').addEventListener('change', e => applyPreset(e.target.value));
@@ -600,9 +677,12 @@ export function onActivate() {
     if (activationRegistered || !ctx?.eventSource?.on) return;
     activationRegistered = true;
     const types = ctx.eventTypes || ctx.event_types || {};
+    if (types.GENERATE_AFTER_DATA) ctx.eventSource.on(types.GENERATE_AFTER_DATA, afterData);
+    if (types.CHAT_COMPLETION_SETTINGS_READY) ctx.eventSource.on(types.CHAT_COMPLETION_SETTINGS_READY, checkOutgoing);
     if (types.MESSAGE_RECEIVED) ctx.eventSource.on(types.MESSAGE_RECEIVED, receiveVerdict);
     if (types.GENERATION_ENDED) ctx.eventSource.on(types.GENERATION_ENDED, generationEnded);
     if (types.GENERATION_STOPPED) ctx.eventSource.on(types.GENERATION_STOPPED, () => {
+        judgeJob?.abort();
         pendingVerdict?.log('生成已停止，本楼保留当前骰点。', 'notice');
         finishPending(); clearInjection();
     });
@@ -614,6 +694,6 @@ export function onActivate() {
     else document.addEventListener('DOMContentLoaded', init, {once:true});
 }
 export function onEnable() { extensionActive = true; init(); }
-export function onDisable() { extensionActive = false; finishPending(); clearInjection(); updateScope(); }
+export function onDisable() { extensionActive = false; judgeJob?.abort(); finishPending(); clearInjection(); updateScope(); }
 
 if (typeof document !== 'undefined' && Array.from(document.scripts).some(s => s.src === import.meta.url)) onActivate();

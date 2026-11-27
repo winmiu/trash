@@ -1,23 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { actionOdds, combatOdds, COMBAT_PROFILES } from '../engine.js';
+import { actionOdds, DIFFICULTY } from '../engine.js';
 import { checkInstructions } from '../scene-check.js';
 import { confirmVerdict, readRecord, storyPool, storyPrompt } from '../story-turn.js';
 
-test('the input table describes only the binary result for fixed scene conditions', () => {
-    for (const die of [1,5,33,54,96,100]) {
-        const prompt = checkInstructions(die);
-        const row = prompt.split('\n').find(s => s.split('：')[0].split('/').includes('现实') && s.includes('优势='));
-        const counts = /，优势=([\d/]+)/.exec(row)[1].split('/').map(Number);
-        for (const [i,modifier] of [-15,0,15].entries()) {
-            for (let n=1; n<=100; n++) {
-                const odds = combatOdds({relativeBase:65,modifier,opponentCount:n,profile:COMBAT_PROFILES.urban});
-                assert.equal(n <= counts[i],die <= odds.probability);
+test('the three compact action cutoffs reproduce the same odds at every roll', () => {
+    for (let die=1; die<=100; die++) {
+        const limits = /最多成功到([^；]+)/.exec(checkInstructions(die))[1].split('/');
+        const options = Object.entries(DIFFICULTY);
+        for (const [column, modifier] of [-15,0,15].entries()) {
+            const last = options.findIndex(([,d]) => d.name === limits[column]);
+            for (const [i,[difficulty]] of options.entries()) {
+                assert.equal(i <= last, die <= actionOdds({difficulty,modifier}).probability);
             }
-        }
-        const action = /一般=([成败/]+)/.exec(prompt)[1].split('/');
-        for (const [i,modifier] of [-15,0,15].entries()) {
-            assert.equal(action[i],die <= actionOdds({difficulty:'normal',modifier}).probability ? '成' : '败');
         }
     }
 });
@@ -79,13 +74,13 @@ test('the prompt offers each narrative branch only with its own active candidate
                 die:45, events:storyPool(events ? rows : [], 'E', () => 0.4),
                 reactions:storyPool(reactions ? rows : [], 'N', () => 0.4),
             });
-            assert.equal(prompt.includes('事件走向：'), events);
+            assert.equal(prompt.includes('事：自然转场'), events);
             assert.equal(prompt.includes('E1=候选'), events);
-            assert.equal(prompt.includes('NPC 反应：'), reactions);
+            assert.equal(prompt.includes('人：未决NPC'), reactions);
             assert.equal(prompt.includes('N1=候选'), reactions);
-            assert.equal(prompt.includes('全排除则跳过'), events || reactions);
-            assert.match(prompt, /行动：/);
-            assert.match(prompt, /交锋：/);
+            assert.equal(prompt.includes('全排除填0'), events || reactions);
+            assert.match(prompt, /行：/);
+            assert.match(prompt, /战：/);
         }
     }
 });

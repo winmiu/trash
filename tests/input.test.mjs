@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
+import { placeInChat, presentIn } from '../delivery.js';
+import { judgeFloor } from '../profile-judge.js';
 
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url)));
 const entry = new URL('../' + manifest.js, import.meta.url);
@@ -56,16 +58,16 @@ test('legacy and fresh installations only inject into the host request', async (
             const input = hostReply('normal');
             assert.equal(input.length,1);
             assert.match(input[0],/d100=\d+/);
-            for (const rule of ['先找出仍未确定的问题', '行动：', '没有数值就用人设', '事件走向：', 'NPC 反应：', '每轮重评']) {
+            for (const rule of ['闲聊/既定事实略过', '任务门槛', '无数值用已知表现', '自然转场', 'NPC选择', '加倍/减半/排除']) {
                 assert.ok(input[0].includes(rule), rule);
             }
-            assert.match(input[0],/后果、严重程度和后续情节全部由主预设/);
+            assert.match(input[0],/后果交主预设/);
             assert.doesNotMatch(input[0],/OLD-CONSEQUENCE|stakes|大败|大成|致命|失败可带来/);
             assert.equal(requests.length,1);
             assert.deepEqual(ctx.extensionPrompts,{});
             assert.equal(events.listenerCount('received'),1);
             const fixed = hostReply('regenerate');
-            assert.match(fixed[0],/本楼已确认裁定[\s\S]*维修计分器[\s\S]*阈值 50%/);
+            assert.match(fixed[0],/本楼裁定[\s\S]*维修计分器[\s\S]*阈值 50%/);
             assert.doesNotMatch(fixed[0],/候选顺序|<!--FD/);
             ctx.chat.splice(1); // delete the replies and reload the stored player message
             ctx.chat = JSON.parse(JSON.stringify(ctx.chat));
@@ -75,7 +77,7 @@ test('legacy and fresh installations only inject into the host request', async (
             ctx.chat.push({is_user:true,mes:'新的玩家楼层'});
             const newInput = assemble('normal');
             assert.match(newInput[0],/<!--FD-/);
-            assert.doesNotMatch(newInput[0],/事件走向：/);
+            assert.doesNotMatch(newInput[0],/自然转场/);
             ctx.chat.push({mes:'本轮只有故事。'});
             events.emit('received',ctx.chat.length-1,'normal');
             assert.match(JSON.stringify(cfg.runLogs[key][0]),/未附可识别/);
@@ -97,8 +99,75 @@ test('legacy and fresh installations only inject into the host request', async (
             const history = cfg.runLogs[key];
             assert.ok(history.some(run => cfg.runInputs[key][run.inputId] === input[0]));
             assert.ok(history.some(run => cfg.runInputs[key][run.inputId] === fixed[0]));
-            assert.match(JSON.stringify(history),/沿用本楼已确认裁定/);
+            assert.match(JSON.stringify(history),/已准备本楼已确认裁定/);
             assert.deepEqual(violations,[]);
         } finally { globalThis.fetch = previousFetch; }
     }
+});
+
+test('the budgeted slot becomes one final instruction without changing preset or assistant prefill', () => {
+    const text='【公平骰】本楼交锋失败。', slot='[fd:abc]'+text+'[/fd:abc]';
+    const prefill=Object.freeze({role:'assistant',content:'故事开场。'});
+    const preset=Object.freeze({role:'system',content:'遵守正文格式。'});
+    for (const budgeted of [[], [{role:'system',content:slot}], [{role:'system',content:'前文'+slot+'后文'}],
+        [{role:'user',content:[{type:'image_url',image_url:{url:'fixture'}},{type:'text',text:slot}]}]]) {
+        const data=placeInChat([...budgeted,preset,prefill],text,'abc');
+        assert.equal(data.at(-1),prefill);
+        assert.equal(data.at(-2).content,'遵守正文格式。\n\n'+text);
+        assert.equal(JSON.stringify(data).split(text).length-1,1);
+        assert.ok(presentIn(data,text));
+        assert.ok(!JSON.stringify(data).includes('[fd:abc]'));
+        assert.equal(preset.content,'遵守正文格式。');
+    }
+});
+
+test('independent profile receives only scene material, returns conditions, and a locked floor pays no judge again', async () => {
+    const profileId='fixture', events=new EventEmitter();
+    const cfg={enabledChats:{[key]:true},judgeProfileId:profileId};
+    const ctx={mainApi:'openai',chatId:'one',characterId:0,characters:[{avatar:'card.png'}],
+        extensionSettings:{fair_dice_winmiu_v1:cfg},extensionPrompts:{},chat:[{is_user:true,mes:'我修计分器。'}],
+        eventTypes:{GENERATE_AFTER_DATA:'assembled',CHAT_COMPLETION_SETTINGS_READY:'outgoing',GENERATION_ENDED:'end',GENERATION_STOPPED:'stop'},
+        eventSource:events,saveSettingsDebounced(){},getCharacterCardFields(){return {description:'角色是维修工。'};},
+        setExtensionPrompt(id,value){this.extensionPrompts[id]={value};}};
+    let calls=0;
+    ctx.ConnectionManagerRequestService={
+        getSupportedProfiles:()=>[{id:profileId,mode:'cc',api:'openai'}],
+        async sendRequest(id,messages,limit,options){
+            assert.equal(id,profileId); assert.equal(options.includePreset,false); assert.equal(limit,256);
+            assert.match(messages[1].content,/维修工/); assert.match(messages[1].content,/计分器/);
+            assert.doesNotMatch(messages[0].content,/d100=|<!--FD/);
+            calls++; return {content:'行|一般|有利|*|角色有维修经验'};
+        },
+    };
+    const url=new URL(entry);url.searchParams.set('case','profile');
+    globalThis.document=Object.assign(new EventTarget(),{readyState:'loading',scripts:[{src:url.href}]});
+    globalThis.SillyTavern={getContext:()=>ctx};
+    await import(url.href);
+    for (const type of ['normal','regenerate']) {
+        await globalThis[manifest.generate_interceptor]([],8192,()=>assert.fail('abort'),type);
+        const data={prompt:[{role:'system',content:ctx.extensionPrompts[slot].value},{role:'system',content:'故事预设'}]};
+        events.emit('assembled',data,true);
+        assert.equal(data.prompt.length,2);
+        events.emit('assembled',data,false);
+        assert.equal(data.prompt.length,1); assert.match(data.prompt[0].content,/故事预设[\s\S]*维修经验[\s\S]*阈值 65%/);
+        assert.doesNotMatch(data.prompt[0].content,/\[fd:|<!--FD-|名次/);
+        events.emit('outgoing',{type,messages:data.prompt});
+        assert.match(JSON.stringify(cfg.runLogs[key][0]),/发往接口的正文请求中核对到/);
+        events.emit('end');
+    }
+    assert.equal(calls,1);
+    ctx.chat.push({is_user:true,mes:'第二楼'});
+    let release;
+    ctx.ConnectionManagerRequestService.sendRequest=()=>new Promise(resolve=>{release=resolve;});
+    let aborted=false;
+    const pending=globalThis[manifest.generate_interceptor]([],1024,()=>{aborted=true;},'normal');
+    events.emit('stop'); release({content:'略|日常聊天'}); await pending;
+    assert.equal(aborted,true); assert.equal(ctx.chat.at(-1).extra.fairDiceFloorV2.verdict,undefined);
+    assert.deepEqual(ctx.extensionPrompts,{});
+});
+
+test('a custom judge profile cannot use an active Custom key at a different address', async () => {
+    const ctx={ConnectionManagerRequestService:{getSupportedProfiles:()=>[{id:'x',mode:'cc',api:'custom','api-url':'https://judge.invalid/v1'}],
+        sendRequest:()=>assert.fail('wrong destination')},chatCompletionSettings:{custom_url:'https://main.invalid/v1'}};
+    await assert.rejects(judgeFloor(ctx,'x',{},new Set(),new AbortController().signal),/地址不同/);
 });
