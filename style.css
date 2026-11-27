@@ -38,6 +38,10 @@
 #fair-dice-root .fd-select { display: flex; align-items: center; gap: 8px; }
 #fair-dice-root .fd-judge select { min-width: 0; max-width: 100%; color: inherit; background: var(--SmartThemeBlurTintColor,#25242c); border: 1px solid var(--fd-line); border-radius: 6px; padding: 4px; }
 #fair-dice-root .fd-select select { flex: 1; }
+#fair-dice-root .fd-select + .fd-select { margin-top: 6px; }
+#fair-dice-root #fd-api-fields { margin-top: 8px; }
+#fair-dice-root #fd-api-fields label { display: grid; gap: 2px; margin-top: 5px; font-size: 12px; }
+#fair-dice-root #fd-api-fields input { width: 100%; min-width: 0; padding: 4px 7px; border: 1px solid var(--fd-line); border-radius: 5px; background: var(--fd-soft); color: inherit; }
 #fair-dice-root .fd-assessment:empty, #fair-dice-root [hidden] { display: none; }
 #fair-dice-root .fd-rows { display: grid; gap: 7px; }
 #fair-dice-root .fd-row { display: flex; align-items: center; gap: 9px; border: 1px solid var(--fd-line); padding: 8px; border-radius: 9px; }

@@ -1,9 +1,9 @@
 {
   "name": "fair-dice-sillytavern",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node tests/smoke.mjs && node tests/integration.mjs && node tests/run-log.mjs && node tests/compact.mjs"
+    "test": "node tests/smoke.mjs && node tests/integration.mjs && node tests/run-log.mjs && node tests/compact.mjs && node tests/referee-api.mjs"
   }
 }

@@ -1,9 +1,9 @@
 import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD100, resolveCheck, parseLevel, isValidAssessment } from './engine.js';
 import { beginRun, assessmentText, resultText, errorText, RefereeStopped } from './run-log.js';
 import { requestReferee } from './referee-request.js';
+import { apiAddress, independentConnection, refereeKey } from './referee-api.js';
 /**
- * Fair Dice v1.5.1 — independent SillyTavern UI extension with optional GM adjudication.
- * Native ST prompt interceptor, no remote calls and no character-card mutation.
+ * Fair Dice v1.6.0 — SillyTavern extension with an optional separate referee connection.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
 const MODULE_KEY = 'fair_dice_winmiu_v1';
@@ -77,6 +77,9 @@ const DEFAULTS = {
     fairness: true,
     autoJudge: true, // Recommended: independent referee classifies before rolling; extra model call when enabled for the chat.
     compactJudge: true,
+    refereeApi: 'main',
+    refereeAddress: '',
+    refereeModel: '',
     eventDice: true,
     npcDice: true,
     actionDice: true,
@@ -96,7 +99,7 @@ let extensionActive = true;
 let root = null;
 let listenersAttached = false;
 let normalizedReference = null;
-let refereeBusy = false; // Guard against quiet-generation implementations invoking interceptors recursively.
+let activeReferee = null;
 const waitingForInterceptor = new Map();
 const generationNames = { normal: '正常生成', regenerate: '重新生成', swipe: '切换候选回复', continue: '继续生成' };
 
@@ -108,7 +111,7 @@ function startLog(cfg, key, title) {
 }
 
 function generationStarted(type = 'normal', _options, dryRun) {
-    if (dryRun || refereeBusy || ['quiet', 'impersonate'].includes(type) || !isEnabledHere()) return;
+    if (dryRun || activeReferee || ['quiet', 'impersonate'].includes(type) || !isEnabledHere()) return;
     const key = chatKey();
     const previous = waitingForInterceptor.get(key);
     if (previous) previous.log('下一次生成已开始，上一次没有进入自动判定。', 'notice');
@@ -120,7 +123,7 @@ function generationStarted(type = 'normal', _options, dryRun) {
 function generationEnded() {
     const key = chatKey();
     const pending = waitingForInterceptor.get(key);
-    if (!pending || refereeBusy) return;
+    if (!pending || activeReferee) return;
     waitingForInterceptor.delete(key);
     pending.log('酒馆生成已停止或结束，本次没有进入公平骰的判定步骤。', 'notice');
 }
@@ -394,7 +397,7 @@ function buildPrompt(cfg, bundle) {
 }
 
 // Independent GM preflight. This is a short, auditable ruling, NOT model private chain-of-thought.
-// It uses the current chat+card context through the documented SillyTavern quiet generation API.
+// Both connections use scene context assembled by SillyTavern.
 const JUDGE_PROMPT = `你是一名独立的桌面角色扮演裁判，而非叙事者或角色扮演者。
 目标：不偏袒{{user}}也不偏袒NPC；依据角色卡、世界书、当前实际动作、已发生事实、装备和人数判定是否需要一次客观检定。
 必须区分：
@@ -409,11 +412,17 @@ JSON字段：{"setting":"modern|martial|fantasy|unknown","kind":"narrative|actio
 
 async function assessScene(cfg, key, round, log, automatic) {
     clearInjection();
-    refereeBusy = true;
-    const isCurrent = () => extensionActive && key === chatKey() && round === roundKey() && (!automatic || (cfg.autoJudge && isEnabledHere()));
+    const controller = new AbortController();
+    activeReferee = controller;
+    const isCurrent = () => !controller.signal.aborted && extensionActive && key === chatKey() && round === roundKey() && (!automatic || (cfg.autoJudge && isEnabledHere()));
     let result;
-    try { result = await requestReferee(context(), JUDGE_PROMPT, { log, readAssessment, isCurrent, compact:cfg.compactJudge }); }
-    finally { refereeBusy = false; }
+    try {
+        const ctx = context();
+        result = await requestReferee(ctx, JUDGE_PROMPT, {
+            log, readAssessment, isCurrent, compact:cfg.compactJudge,
+            connection:independentConnection(ctx, cfg), settingsSignal:controller.signal,
+        });
+    } finally { activeReferee = null; }
     if (!result || !isCurrent()) return null;
     cfg.assessments[key] = result;
     delete cfg.rolls[key];
@@ -424,7 +433,7 @@ async function assessScene(cfg, key, round, log, automatic) {
 // Registered from manifest.json. This runs before prompt assembly, never edits the chat array.
 globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize, abort, type = 'normal') {
     if (['quiet', 'impersonate'].includes(type)) return;
-    if (refereeBusy) {
+    if (activeReferee) {
         if (isEnabledHere()) startLog(initSettings(), chatKey(), generationNames[type] || '自动判定')('已有前置裁判请求在等待答复，本次未重复判定。', 'notice');
         return;
     }
@@ -577,7 +586,7 @@ async function analyzeNow() {
     const label=root?.querySelector('#fd-assessment');
     if (!cfg || !key) return;
     const log = startLog(cfg, key, '手动评估');
-    if (refereeBusy) {
+    if (activeReferee) {
         log('已有裁判请求在等待答复，本次未重复评估。', 'notice');
         return;
     }
@@ -763,6 +772,18 @@ function updateScope() {
     const method = cfg.autoJudge ? (cfg.compactJudge ? 'compact' : 'full') : 'local';
     const refereeSelect = root.querySelector('#fd-referee');
     if (refereeSelect) refereeSelect.value = method;
+    const apiSelect = root.querySelector('#fd-api');
+    if (apiSelect) {
+        apiSelect.value = cfg.refereeApi;
+        root.querySelector('#fd-api-fields').hidden = cfg.refereeApi !== 'independent';
+        const address = root.querySelector('#fd-api-address');
+        const model = root.querySelector('#fd-api-model');
+        const keyInput = root.querySelector('#fd-api-key');
+        if (document.activeElement !== address) address.value = cfg.refereeAddress;
+        if (document.activeElement !== model) model.value = cfg.refereeModel;
+        keyInput.disabled = !cfg.refereeAddress;
+        if (document.activeElement !== keyInput) keyInput.value = refereeKey(context(), cfg.refereeAddress);
+    }
     if (label) {
         const note = { compact:'精简 AI 裁判 · 失败最多重试 3 次', full:'完整 AI 裁判 · 失败最多重试 3 次', local:'本地规则自动判定' };
         label.textContent = !key ? '请先打开一个聊天。' : cfg.enabledChats[key] ? note[method] : '开启后，生成回复时自动判定。';
@@ -856,6 +877,13 @@ function buildUI() {
           <details class="fd-drawer fd-judge"><summary>判定设置</summary>
             <p class="fd-help">以下设置用于所有已启用的聊天。</p>
             <label class="fd-select">裁判方式<select id="fd-referee"><option value="compact">AI · 精简上下文</option><option value="full">AI · 完整上下文</option><option value="local">本地规则</option></select></label>
+            <label class="fd-select">裁判 API<select id="fd-api"><option value="main">跟随正文</option><option value="independent">独立 API</option></select></label>
+            <div id="fd-api-fields" hidden>
+              <label>接口地址<input id="fd-api-address" type="url" placeholder="https://…/v1" autocomplete="off" spellcheck="false" /></label>
+              <label>裁判模型<input id="fd-api-model" type="text" placeholder="服务商提供的模型名" spellcheck="false" /></label>
+              <label>API 密钥<input id="fd-api-key" type="password" autocomplete="off" /></label>
+              <p class="fd-help">酒馆将裁判上下文发给此 OpenAI 兼容接口。密钥仅在当前标签页保留，本机免密接口可留空。</p>
+            </div>
             <div class="fd-options">
               <label><input id="fd-fairness" type="checkbox" /> 公平叙事指引</label>
               <label><input id="fd-eventDice" type="checkbox" /> 事件走向</label>
@@ -888,7 +916,7 @@ function buildUI() {
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v1.5.1</span> winmiu</small>
+            <small class="fd-signature"><span>v1.6.0</span> winmiu</small>
           </footer>
         </div>
       </details>`;
@@ -898,6 +926,7 @@ function buildUI() {
         const cfg = initSettings(), key = chatKey();
         if (!cfg || !key) return;
         cfg.enabledChats[key] = e.target.checked;
+        if (!e.target.checked) activeReferee?.abort();
         startLog(cfg, key, '聊天开关')(e.target.checked ? '已启用，等待下一次正常生成。' : '已关闭本聊天的自动判定。');
         delete cfg.rolls[key];
         if (!e.target.checked) { delete cfg.queued[key]; clearInjection(); }
@@ -908,6 +937,7 @@ function buildUI() {
     }
     root.querySelector('#fd-preset')?.addEventListener('change', e => applyPreset(e.target.value));
     root.querySelector('#fd-referee')?.addEventListener('change', e => {
+        activeReferee?.abort();
         const cfg = initSettings();
         const method = e.target.value;
         const useAI = method !== 'local';
@@ -915,6 +945,37 @@ function buildUI() {
         if (useAI !== cfg.autoJudge) changeSetting('autoJudge', useAI);
         else persist();
         updateScope();
+    });
+    root.querySelector('#fd-api')?.addEventListener('change', e => {
+        activeReferee?.abort();
+        initSettings().refereeApi = e.target.value === 'independent' ? 'independent' : 'main';
+        persist(); updateScope();
+    });
+    root.querySelector('#fd-api-address')?.addEventListener('change', e => {
+        activeReferee?.abort();
+        const cfg = initSettings();
+        let address = '';
+        e.target.setCustomValidity('');
+        try {
+            if (e.target.value.trim()) address = apiAddress(e.target.value);
+        } catch (error) {
+            e.target.setCustomValidity(errorText(error));
+            e.target.reportValidity();
+        }
+        if (address !== cfg.refereeAddress) refereeKey(context(), cfg.refereeAddress, '');
+        cfg.refereeAddress = address;
+        if (address) e.target.value = address;
+        persist(); updateScope();
+    });
+    root.querySelector('#fd-api-model')?.addEventListener('change', e => {
+        activeReferee?.abort();
+        initSettings().refereeModel = e.target.value.trim();
+        persist();
+    });
+    root.querySelector('#fd-api-key')?.addEventListener('change', e => {
+        activeReferee?.abort();
+        const address = initSettings().refereeAddress;
+        if (address) refereeKey(context(), address, e.target.value.trim());
     });
     root.querySelector('#fd-mode')?.addEventListener('change', saveMode);
     root.querySelector('#fd-combat-profile')?.addEventListener('change', e => {
@@ -962,7 +1023,7 @@ export function onActivate() {
     else document.addEventListener('DOMContentLoaded', init, { once: true });
 }
 export function onEnable() { extensionActive = true; init(); updateScope(); }
-export function onDisable() { extensionActive = false; clearInjection(); updateScope(); }
+export function onDisable() { extensionActive = false; activeReferee?.abort(); clearInjection(); updateScope(); }
 
 // SillyTavern 1.16.0 activates the extension by inserting its module script.
 // A dynamic import for a lifecycle hook can occur independently of activation.
