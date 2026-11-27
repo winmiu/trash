@@ -1,9 +1,10 @@
 import { rollD100 } from './engine.js';
 import { beginRun } from './run-log.js';
-import { storyPool, storyPrompt } from './story-turn.js';
+import { confirmVerdict, readRecord, storyPool, storyPrompt } from './story-turn.js';
 
 const MODULE_KEY = 'fair_dice_winmiu_v1';
 const PROMPT_KEY = 'fair_dice_winmiu_injection_v1';
+const FLOOR_FIELD = 'fairDiceFloorV2';
 const EVENT_DEPTH = 0;
 const IN_CHAT = 1; // SillyTavern release extension_prompt_types.IN_CHAT
 const SYSTEM_ROLE = 0;
@@ -69,6 +70,7 @@ let extensionActive = true;
 let activationRegistered = false;
 let normalizedReference = null;
 let injectedChat = null;
+let pendingVerdict = null;
 const generationNames = { normal:'正常生成', regenerate:'重新生成', swipe:'切换候选回复', continue:'继续生成' };
 
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
@@ -166,9 +168,11 @@ function clearInjection() {
     injectedChat = null;
     ctx.setExtensionPrompt?.(PROMPT_KEY, '', IN_CHAT, EVENT_DEPTH, false, SYSTEM_ROLE);
     if (ctx.extensionPrompts) delete ctx.extensionPrompts[PROMPT_KEY];
+    updateRerollButton();
 }
 
 function chatChanged() {
+    finishPending();
     clearInjection();
     renderRows();
     updateScope();
@@ -205,9 +209,7 @@ function roundKey() {
 }
 
 
-function candidates(cfg, key) {
-    const ctx = context();
-    const profile = profileFor(cfg, key);
+function migratedCandidates(ctx, cfg, key, profile) {
     const card = ctx.characters?.[ctx.characterId];
     const player = ctx.chat.findLastIndex(m => m?.is_user);
     const prior = ctx.chat.slice(0, player < 0 ? 0 : player).findLast(m => m && !m.is_user && !m.is_system);
@@ -215,19 +217,122 @@ function candidates(cfg, key) {
     const signature = stringHash(JSON.stringify([round, prior?.mes, card?.avatar, card?.data?.description ?? card?.description,
         card?.data?.personality ?? card?.personality, card?.data?.scenario ?? card?.scenario, profile.events, profile.reactions]));
     const previous = cfg.inputTurns[key];
-    if (previous?.signature === signature) return previous;
+    if (previous?.signature === signature && validTurn(previous)) return previous;
     // Same-round existing d100s survive the upgrade; old assessment text never enters the input.
     const legacy = cfg.storyTurns?.[key];
     const roll = cfg.rolls?.[key];
     const legacyDie = (legacy?.round === round ? legacy?.checks?.die : null) ??
         (roll?.round === round ? roll?.bundle?.check?.roll : null);
-    const die = Number.isInteger(legacyDie) && legacyDie >= 1 && legacyDie <= 100 ? legacyDie : rollD100(rand01);
-    const turn = { signature, die, events:storyPool(profile.events, 'E', rand01), reactions:storyPool(profile.reactions, 'N', rand01) };
+    if (Number.isInteger(legacyDie) && legacyDie >= 1 && legacyDie <= 100) return drawTurn(profile, legacyDie);
+    return null;
+}
+
+function drawTurn(profile, die = rollD100(rand01)) {
+    return {die, events:storyPool(profile.events, 'E', rand01), reactions:storyPool(profile.reactions, 'N', rand01)};
+}
+
+function validTurn(turn) {
+    return Number.isInteger(turn?.die) && turn.die >= 1 && turn.die <= 100 &&
+        [turn.events, turn.reactions].every(pool => Array.isArray(pool?.order) && Array.isArray(pool?.items));
+}
+
+// Bind the draw to the surviving player message, even when replies are deleted or regenerated.
+function currentFloor(ctx, cfg, key) {
+    const index = ctx.chat.findLastIndex(message => message?.is_user);
+    if (index >= 0) {
+        const player = ctx.chat[index];
+        player.extra ??= {};
+        return {owner:player.extra, label:'玩家消息 #' + (index + 1)};
+    }
+    if (ctx.chatMetadata) return {owner:ctx.chatMetadata, label:'开场'};
+    cfg.openings ??= {};
+    return {owner:cfg.openings[key] ??= {}, label:'开场'};
+}
+
+function floorTurn(ctx, cfg, key, reroll = false) {
+    const {owner, label} = currentFloor(ctx, cfg, key);
+    const previous = owner[FLOOR_FIELD];
+    if (validTurn(previous) && !reroll) return {turn:previous, label, source:'沿用本楼'};
+    const profile = profileFor(cfg, key);
+    const migrated = !reroll && migratedCandidates(ctx, cfg, key, profile);
+    const turn = migrated || drawTurn(profile);
+    turn.token = Array.from({length:2}, () => Math.floor(rand01() * 4294967296).toString(16).padStart(8, '0')).join('');
+    turn.revision = (Number(previous?.revision) || 0) + 1;
+    owner[FLOOR_FIELD] = turn;
     delete cfg.inputTurns[key];
-    cfg.inputTurns[key] = turn;
-    const keys = Object.keys(cfg.inputTurns);
-    for (const old of keys.slice(0, Math.max(0, keys.length - 60))) delete cfg.inputTurns[old];
-    return turn;
+    if (!reroll || typeof ctx.saveChat !== 'function') ctx.saveMetadataDebounced?.();
+    return {turn, label, source:reroll ? '手动重掷' : migrated ? '沿用升级前的骰点' : '首次准备'};
+}
+
+function updateRerollButton() {
+    const button = root?.querySelector('#fd-reroll');
+    if (button) button.disabled = !isEnabledHere() || injectedChat !== null || !!pendingVerdict;
+}
+
+async function rerollFloor() {
+    if (!isEnabledHere() || injectedChat !== null || pendingVerdict) return;
+    const ctx = context(), cfg = initSettings(), key = chatKey();
+    const log = beginRun(cfg, key, '手动重掷', () => { persist(); renderRunLog(); });
+    try {
+        const {turn, label} = floorTurn(ctx, cfg, key, true);
+        if (ctx.saveChat) await ctx.saveChat();
+        log(label + ' · 第 ' + turn.revision + ' 组 · d100=' + turn.die + '。下次生成采用这组骰点和候选。');
+    } catch {
+        log('未能保存本楼重掷，请检查当前聊天。', 'error');
+    }
+}
+
+function finishPending() {
+    if (pendingVerdict?.timer) clearTimeout(pendingVerdict.timer);
+    pendingVerdict = null;
+    updateRerollButton();
+}
+
+function generationEnded() {
+    clearInjection();
+    const pending = pendingVerdict;
+    // Streaming can announce the end just before delivery of the completed message.
+    if (!pending || pending.timer) return;
+    pending.timer = setTimeout(() => {
+        if (pendingVerdict !== pending) return;
+        pending.log('未收到可确认的正文裁定。本楼保留原骰点。', 'notice');
+        finishPending();
+    }, 3000);
+}
+
+function receiveVerdict(id, type) {
+    const pending = pendingVerdict, ctx = context();
+    if (!pending || !isEnabledHere() || pending.key !== chatKey() || ['quiet','impersonate','first_message'].includes(type)) return;
+    const msg = ctx.chat?.[id];
+    if (!msg || msg.is_user || msg.is_system || Number(id) !== ctx.chat.length - 1) return;
+    const {owner} = currentFloor(ctx, initSettings(), pending.key);
+    if (owner[FLOOR_FIELD] !== pending.turn) return;
+    const token = pending.turn.token;
+    const item = readRecord(msg.mes, token);
+    if (!item && /<!--FD-[a-f0-9]{16}\s/.test(msg.mes ?? '')) return;
+    finishPending();
+    if (item) {
+        msg.mes = item.body;
+        if (Array.isArray(msg.swipes)) {
+            for (let i = 0; i < msg.swipes.length; i++) {
+                const swipe = readRecord(msg.swipes[i], token);
+                if (swipe) msg.swipes[i] = swipe.body;
+            }
+        }
+        const display = readRecord(msg.extra?.display_text, token);
+        if (display) msg.extra.display_text = display.body;
+    }
+    const verdict = item?.body.trim() && confirmVerdict(pending.turn, item.record);
+    if (verdict) {
+        pending.turn.verdict = verdict;
+        for (const line of verdict) pending.log(line);
+    } else {
+        pending.log(item ? '裁定条件或成败未通过本机校验，保留正文和本楼骰点。' : '本次回复未附可识别的裁定，保留正文和本楼骰点。', 'notice');
+    }
+    if (item) {
+        ctx.saveMetadataDebounced?.();
+        ctx.updateMessageBlock?.(id, msg);
+    }
 }
 
 // SillyTavern reads this one named prompt while assembling its own generation request.
@@ -240,16 +345,19 @@ globalThis.FairDiceIndependentInterceptor = function (_chat, _contextSize, _abor
             log('未注入：当前酒馆没有提供提示词接口。', 'error');
             return;
         }
-        const turn = candidates(cfg, key);
+        const {turn, label, source} = floorTurn(ctx, cfg, key);
         const prompt = storyPrompt(turn);
+        finishPending();
+        if (!turn.verdict) pendingVerdict = {turn, key, log};
         injectedChat = key;
         ctx.setExtensionPrompt(PROMPT_KEY, prompt, IN_CHAT, EVENT_DEPTH, false, SYSTEM_ROLE,
             () => injectedChat === key && chatKey() === key && isEnabledHere());
-        const rules = ['判定时机', '行动难度', '交锋强弱'];
-        if (turn.events.items.length) rules.push('事件走向');
-        if (turn.reactions.items.length) rules.push('NPC 反应');
-        log('已注入正文输入 · ' + rules.join('、') + '。本机候选 d100=' + turn.die + ' · 公平骰模型请求 0 次。');
+        updateRerollButton();
+        log(label + ' · ' + source + '第 ' + turn.revision + ' 组 · d100=' + turn.die + '。');
+        log((turn.verdict ? '已注入正文输入 · 沿用本楼已确认裁定。' : '已注入正文输入 · 等待同一条正文回复中的简短裁定。') + '公平骰模型请求 0 次。', 'info', prompt);
+        if (turn.verdict) for (const line of turn.verdict) log(line);
     } catch {
+        finishPending();
         clearInjection();
         log('准备或写入正文输入失败，请检查酒馆版本。', 'error');
     }
@@ -261,12 +369,7 @@ function customize(cfg) {
     profile.activePreset = 'custom';
     const sel = root?.querySelector('#fd-preset');
     if (sel) sel.value = 'custom';
-    invalidateRoll(cfg);
     persist();
-}
-function invalidateRoll(cfg) {
-    const key = chatKey();
-    if (key) delete cfg.inputTurns[key];
 }
 function applyPreset(value) {
     const cfg = initSettings();
@@ -286,7 +389,6 @@ function applyPreset(value) {
         profile.reactions = rowsFromPreset(BUILT_INS[value].reactions);
     } else return;
     profile.activePreset = value;
-    invalidateRoll(cfg);
     persist();
     renderRows();
 }
@@ -399,6 +501,12 @@ function renderRunLog() {
             const seconds = Math.max(0, (step.at - run.at) / 1000).toFixed(1);
             row.append(el('div', step.level === 'error' ? 'fd-log-error' : '', '+' + seconds + 's　' + prefix + step.text));
         }
+        const input = cfg.runInputs?.[key]?.[run.inputId];
+        if (typeof input === 'string') {
+            const details = el('details', 'fd-log-input');
+            details.append(el('summary', '', '查看本次实际注入的内容'), el('pre', '', input));
+            row.append(details);
+        }
         list.append(row);
     }
 }
@@ -410,6 +518,7 @@ function updateScope() {
     const toggle = root.querySelector('#fd-enabled');
     toggle.disabled = !key;
     toggle.checked = isEnabledHere();
+    updateRerollButton();
     root.querySelector('#fd-scope').textContent = key ? '随角色卡和当前剧情判定 · 一次注入正文输入' : '请先打开一个聊天。';
     renderRunLog();
 }
@@ -448,28 +557,29 @@ function buildUI() {
             <label class="fd-switch"><input id="fd-enabled" type="checkbox" aria-labelledby="fd-enable-label" /><span></span></label>
           </div>
 
-          <details class="fd-drawer" id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><div class="fd-log-list"></div></details>
+          <details class="fd-drawer" id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><button id="fd-reroll" class="fd-btn" type="button">重新摇骰子</button><p class="fd-help">只重掷本楼。可先删除 AI 回复，保留玩家消息，再重掷并生成。</p><div class="fd-log-list"></div></details>
 
           <details class="fd-drawer"><summary>事件与反应权重</summary>
             <div class="fd-presets"><label for="fd-preset">本聊天预设</label><select id="fd-preset"><option value="balanced">公平中立</option><option value="slice">生活日常</option><option value="dynamic">变化较多</option><option value="custom">自定义</option></select></div>
-            <p class="fd-help">显示本聊天的基础权重。正文生成时按剧情调整。</p>
+            <p class="fd-help">基础权重的修改在新楼或手动重掷时生效。正文生成时按剧情调整。</p>
             <details class="fd-list"><summary>事件走向</summary><div id="fd-events-rows" class="fd-rows"></div><button id="fd-add-events" class="fd-btn" type="button">添加事件</button></details>
             <details class="fd-list"><summary>NPC 反应</summary><div id="fd-reactions-rows" class="fd-rows"></div><button id="fd-add-reactions" class="fd-btn" type="button">添加反应</button></details>
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v1.9.1</span> winmiu</small>
+            <small class="fd-signature"><span>v2.0.0</span> winmiu</small>
           </footer>
         </div>
       </details>`;
 
     host.append(root);
     root.querySelector('#fd-log').addEventListener('toggle', renderRunLog);
+    root.querySelector('#fd-reroll').addEventListener('click', rerollFloor);
     root.querySelector('#fd-enabled').addEventListener('change', e => {
         const cfg = initSettings(), key = chatKey();
         if (!cfg || !key) return;
         cfg.enabledChats[key] = e.target.checked;
-        if (!e.target.checked) clearInjection();
+        if (!e.target.checked) { finishPending(); clearInjection(); }
         persist(); updateScope();
     });
     root.querySelector('#fd-preset').addEventListener('change', e => applyPreset(e.target.value));
@@ -490,9 +600,12 @@ export function onActivate() {
     if (activationRegistered || !ctx?.eventSource?.on) return;
     activationRegistered = true;
     const types = ctx.eventTypes || ctx.event_types || {};
-    for (const event of [types.GENERATION_STOPPED, types.GENERATION_ENDED]) {
-        if (event) ctx.eventSource.on(event,clearInjection);
-    }
+    if (types.MESSAGE_RECEIVED) ctx.eventSource.on(types.MESSAGE_RECEIVED, receiveVerdict);
+    if (types.GENERATION_ENDED) ctx.eventSource.on(types.GENERATION_ENDED, generationEnded);
+    if (types.GENERATION_STOPPED) ctx.eventSource.on(types.GENERATION_STOPPED, () => {
+        pendingVerdict?.log('生成已停止，本楼保留当前骰点。', 'notice');
+        finishPending(); clearInjection();
+    });
     if (types.CHAT_CHANGED) ctx.eventSource.on(types.CHAT_CHANGED,chatChanged);
     if (types.CHAT_CREATED) ctx.eventSource.on(types.CHAT_CREATED,chatChanged);
     if (types.SETTINGS_UPDATED) ctx.eventSource.on(types.SETTINGS_UPDATED,() => { renderRows(); updateScope(); });
@@ -501,6 +614,6 @@ export function onActivate() {
     else document.addEventListener('DOMContentLoaded', init, {once:true});
 }
 export function onEnable() { extensionActive = true; init(); }
-export function onDisable() { extensionActive = false; clearInjection(); updateScope(); }
+export function onDisable() { extensionActive = false; finishPending(); clearInjection(); updateScope(); }
 
 if (typeof document !== 'undefined' && Array.from(document.scripts).some(s => s.src === import.meta.url)) onActivate();

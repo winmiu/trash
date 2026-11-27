@@ -26,7 +26,7 @@ test('legacy and fresh installations only inject into the host request', async (
                 eventTypes:{GENERATION_ENDED:'ended',GENERATION_STOPPED:'stop',CHAT_CHANGED:'change',MESSAGE_RECEIVED:'received'},
                 eventSource:events, saveSettingsDebounced(){},
                 generateQuietPrompt:forbidden('quiet request'), generate:forbidden('generation'), generateRaw:forbidden('raw generation'),
-                updateMessageBlock:forbidden('edited output'),
+                updateMessageBlock(_id, message){assert.equal(message.mes,'计分器亮了。');},
                 setExtensionPrompt(id,value,position,depth,scan,role,filter) {
                     this.extensionPrompts[id]={value,position,depth,scan,role,filter};
                 },
@@ -42,11 +42,15 @@ test('legacy and fresh installations only inject into the host request', async (
             function hostReply(type) {
                 const input = assemble(type);
                 requests.push(input); // the host's one narration call
-                const body = Object.freeze({is_user:false,mes:'计分器亮了。'});
+                const turn = ctx.chat.findLast(m => m.is_user).extra.fairDiceFloorV2;
+                const prefix = turn.verdict ? '' : '<!--FD-' + turn.token + ' 行|一般|中性|' + (turn.die <= 50 ? '成' : '败') + '|玩家已开始维修计分器 -->\n';
+                const body = {is_user:false,mes:prefix + '计分器亮了。',swipe_id:0,swipes:[prefix + '计分器亮了。']};
                 ctx.chat.push(body);
+                if (type === 'normal') events.emit('ended'); // streaming order
                 events.emit('received',ctx.chat.length-1,type);
                 events.emit('ended');
                 assert.equal(body.mes,'计分器亮了。');
+                assert.equal(body.swipes[0],body.mes);
                 return input;
             }
             const input = hostReply('normal');
@@ -56,11 +60,28 @@ test('legacy and fresh installations only inject into the host request', async (
                 assert.ok(input[0].includes(rule), rule);
             }
             assert.match(input[0],/后果、严重程度和后续情节全部由主预设/);
-            assert.doesNotMatch(input[0],/OLD-CONSEQUENCE|<!--|HTML|JSON|stakes|字段|回执|大败|大成|致命|失败可带来/);
+            assert.doesNotMatch(input[0],/OLD-CONSEQUENCE|stakes|大败|大成|致命|失败可带来/);
             assert.equal(requests.length,1);
             assert.deepEqual(ctx.extensionPrompts,{});
-            assert.equal(events.listenerCount('received'),0);
-            for (const type of ['regenerate','swipe','continue']) assert.deepEqual(hostReply(type),input);
+            assert.equal(events.listenerCount('received'),1);
+            const fixed = hostReply('regenerate');
+            assert.match(fixed[0],/本楼已确认裁定[\s\S]*维修计分器[\s\S]*阈值 50%/);
+            assert.doesNotMatch(fixed[0],/候选顺序|<!--FD/);
+            ctx.chat.splice(1); // delete the replies and reload the stored player message
+            ctx.chat = JSON.parse(JSON.stringify(ctx.chat));
+            ctx.characters[0].description = '角色卡编辑';
+            cfg.chatProfiles[key].events = [];
+            for (const type of ['swipe','continue','normal']) assert.deepEqual(hostReply(type),fixed);
+            ctx.chat.push({is_user:true,mes:'新的玩家楼层'});
+            const newInput = assemble('normal');
+            assert.match(newInput[0],/<!--FD-/);
+            assert.doesNotMatch(newInput[0],/事件走向：/);
+            ctx.chat.push({mes:'本轮只有故事。'});
+            events.emit('received',ctx.chat.length-1,'normal');
+            assert.match(JSON.stringify(cfg.runLogs[key][0]),/未附可识别/);
+            events.emit('ended');
+            ctx.chat.splice(-2);
+            assert.deepEqual(assemble('normal'),fixed);
             assemble('normal'); assemble('normal');
             assert.deepEqual(Object.keys(ctx.extensionPrompts),[slot]);
             assert.equal(ctx.extensionPrompts[slot].depth,0);
@@ -73,7 +94,10 @@ test('legacy and fresh installations only inject into the host request', async (
             ctx.chatId = 'one';
             cfg.enabledChats[key]=false;
             assert.deepEqual(assemble('normal'),[]);
-            assert.match(JSON.stringify(cfg.runLogs[key]),/已注入正文输入 · 判定时机、行动难度、交锋强弱、事件走向、NPC 反应/);
+            const history = cfg.runLogs[key];
+            assert.ok(history.some(run => cfg.runInputs[key][run.inputId] === input[0]));
+            assert.ok(history.some(run => cfg.runInputs[key][run.inputId] === fixed[0]));
+            assert.match(JSON.stringify(history),/沿用本楼已确认裁定/);
             assert.deepEqual(violations,[]);
         } finally { globalThis.fetch = previousFetch; }
     }

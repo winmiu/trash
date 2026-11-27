@@ -64,4 +64,7 @@
 #fair-dice-root .fd-log-list { max-height: 22em; overflow: auto; overflow-wrap: anywhere; }
 #fair-dice-root .fd-log-run { border-top: 1px solid var(--SmartThemeBorderColor, #8888); padding: .55em 0; font-size: .9em; }
 #fair-dice-root .fd-log-run div { margin-top: .2em; }
+#fair-dice-root .fd-log-input summary { cursor: pointer; margin: .35em 0; }
+#fair-dice-root .fd-log-input pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: .4em 0; user-select: text; }
+#fair-dice-root #fd-reroll:disabled { opacity: .5; cursor: default; }
 #fair-dice-root .fd-log-error { font-weight: 650; border-inline-start: .2em solid #cf6b55; padding-inline-start: .5em; }

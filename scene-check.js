@@ -4,6 +4,30 @@ const RELATIVE = { '明显劣势':15, '劣势':35, '相当':50, '优势':65, '�
 const WORLDS = { urban:'现实', neutral:'一般', strict:'严格阶位' };
 const ADJUSTMENTS = [-15, 0, 15];
 
+export function checkVerdict(fields, die) {
+    const [kind, ...args] = fields;
+    const combat = kind === '战';
+    if (args.length !== (combat ? 6 : 4)) return null;
+    const [base, state, result, fact] = combat ? [args[1], args[2], args[4], args[5]] : args;
+    const modifier = new Map([['不利', -15], ['中性', 0], ['有利', 15]]).get(state);
+    if (modifier === undefined) return null;
+    let chance, conditions;
+    if (combat) {
+        const world = Object.keys(WORLDS).find(key => WORLDS[key] === args[0]);
+        if (!world || !Object.hasOwn(RELATIVE, base) || !/^(?:[1-9]\d?|100)$/.test(args[3])) return null;
+        chance = combatOdds({relativeBase:RELATIVE[base], modifier, profile:COMBAT_PROFILES[world], opponentCount:Number(args[3])}).probability;
+        conditions = [args[0], base, '对手 ' + args[3] + ' 人'].join('，');
+    } else {
+        const difficulty = Object.keys(DIFFICULTY).find(key => DIFFICULTY[key].name === base);
+        if (!difficulty) return null;
+        chance = actionOdds({difficulty, modifier}).probability;
+        conditions = base;
+    }
+    const success = die <= chance;
+    if (result !== (success ? '成' : '败')) return null;
+    return (combat ? '交锋' : '行动') + ' · ' + fact + '。' + conditions + '，' + state + '（' + (modifier > 0 ? '+' : '') + modifier + '）。d100=' + die + ' / 阈值 ' + chance + '%，' + (success ? '成功' : '失败') + '。';
+}
+
 // With fixed abilities and conditions, facing more opponents cannot improve the odds.
 function maxWinningCount(die, relativeBase, modifier, profile) {
     let low = 0, high = 100;
