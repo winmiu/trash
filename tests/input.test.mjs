@@ -30,7 +30,7 @@ test('legacy and fresh installations only inject into the host request', async (
                 eventTypes:{GENERATION_ENDED:'ended',GENERATION_STOPPED:'stop',CHAT_CHANGED:'change',MESSAGE_RECEIVED:'received'},
                 eventSource:events, saveSettingsDebounced(){},
                 generateQuietPrompt:forbidden('quiet request'), generate:forbidden('generation'), generateRaw:forbidden('raw generation'),
-                updateMessageBlock(_id, message){assert.equal(message.mes,'计分器亮了。');},
+                updateMessageBlock(_id, message){assert.doesNotMatch(message.mes,/<!--FD-/);},
                 setExtensionPrompt(id,value,position,depth,scan,role,filter) {
                     this.extensionPrompts[id]={value,position,depth,scan,role,filter};
                 },
@@ -47,13 +47,14 @@ test('legacy and fresh installations only inject into the host request', async (
                 const input = assemble(type);
                 requests.push(input); // the host's one narration call
                 const turn = ctx.chat.findLast(m => m.is_user).extra.fairDiceFloorV2;
-                const prefix = turn.verdict ? '' : '<!--FD-' + turn.token + ' 行|一般|中性|' + (turn.die <= 50 ? '成' : '败') + '|玩家已开始维修计分器 -->\n';
-                const body = {is_user:false,mes:prefix + '计分器亮了。',swipe_id:0,swipes:[prefix + '计分器亮了。']};
+                const prefix = turn.verdict ? '' : '<!--FD-' + turn.token + ' 行|一般|中性|' + (turn.die <= 50 ? '成' : '败') + '|目标：修好计分器，依据：玩家有工具 -->\n';
+                const story = turn.die <= 50 ? '计分器亮了。' : '计分器依然黑着。';
+                const body = {is_user:false,mes:prefix + story,swipe_id:0,swipes:[prefix + story]};
                 ctx.chat.push(body);
                 if (type === 'normal') events.emit('ended'); // streaming order
                 events.emit('received',ctx.chat.length-1,type);
                 events.emit('ended');
-                assert.equal(body.mes,'计分器亮了。');
+                assert.equal(body.mes,story);
                 assert.equal(body.swipes[0],body.mes);
                 assert.match(body.extra.fairDiceAudit.text,/成功阈值 50%/);
                 return input;
@@ -64,13 +65,13 @@ test('legacy and fresh installations only inject into the host request', async (
             for (const rule of ['闲聊/既定事实略过', '任务门槛', '无数值用已知表现', '自然转场', 'NPC选择', '加倍/减半/排除']) {
                 assert.ok(input[0].includes(rule), rule);
             }
-            assert.match(input[0],/后果交主预设/);
+            assert.match(input[0],/挽回须等玩家下一条消息再判/);
             assert.doesNotMatch(input[0],/OLD-CONSEQUENCE|stakes|大败|大成|致命|失败可带来/);
             assert.equal(requests.length,1);
             assert.deepEqual(ctx.extensionPrompts,{});
             assert.equal(events.listenerCount('received'),1);
             const fixed = hostReply('regenerate');
-            assert.match(fixed[0],/本楼裁定[\s\S]*维修计分器[\s\S]*阈值 50%/);
+            assert.match(fixed[0],/本楼裁定[\s\S]*目标：修好计分器[\s\S]*阈值 50%[\s\S]*挽回须等玩家下一条消息再判/);
             assert.doesNotMatch(fixed[0],/候选顺序|<!--FD/);
             ctx.chat.splice(1); // delete the replies and reload the stored player message
             ctx.chat = JSON.parse(JSON.stringify(ctx.chat));
@@ -80,6 +81,7 @@ test('legacy and fresh installations only inject into the host request', async (
             ctx.chat.push({is_user:true,mes:'新的玩家楼层'});
             const newInput = assemble('normal');
             assert.match(newInput[0],/<!--FD-/);
+            assert.doesNotMatch(newInput[0],/目标：修好计分器|本楼裁定】/);
             assert.doesNotMatch(newInput[0],/自然转场/);
             ctx.chat.push({mes:'本轮只有故事。'});
             events.emit('received',ctx.chat.length-1,'normal');
@@ -173,20 +175,21 @@ test('independent profile receives only scene material, returns conditions, and 
             assert.equal(id,profileId); assert.equal(options.includePreset,false); assert.equal(limit,256);
             assert.match(messages[1].content,/维修工/); assert.match(messages[1].content,/计分器/);
             assert.doesNotMatch(messages[0].content,/d100=|<!--FD/);
-            calls++; return {content:'行|一般|有利|*|角色有维修经验'};
+            assert.match(messages[0].content,/目标：动作及对象，依据：事实/);
+            calls++; return {content:'行|一般|有利|*|目标：修好计分器，依据：角色有维修经验'};
         },
     };
     const url=new URL(entry);url.searchParams.set('case','profile');
     globalThis.document=Object.assign(new EventTarget(),{readyState:'loading',scripts:[{src:url.href}]});
     globalThis.SillyTavern={getContext:()=>ctx};
     await import(url.href);
-    for (const type of ['normal','regenerate']) {
+    for (const type of ['normal','regenerate','swipe','continue']) {
         await globalThis[manifest.generate_interceptor]([],8192,()=>assert.fail('abort'),type);
         const data={prompt:[{role:'system',content:ctx.extensionPrompts[slot].value},{role:'system',content:'故事预设'}]};
         events.emit('assembled',data,true);
         assert.equal(data.prompt.length,2);
         events.emit('assembled',data,false);
-        assert.equal(data.prompt.length,1); assert.match(data.prompt[0].content,/故事预设[\s\S]*维修经验[\s\S]*阈值 65%/);
+        assert.equal(data.prompt.length,1); assert.match(data.prompt[0].content,/故事预设[\s\S]*目标：修好计分器[\s\S]*维修经验[\s\S]*阈值 65%[\s\S]*挽回须等玩家下一条消息再判/);
         assert.doesNotMatch(data.prompt[0].content,/\[fd:|<!--FD-|名次/);
         events.emit('outgoing',{type,messages:data.prompt});
         assert.match(JSON.stringify(cfg.runLogs[key][0]),/发往接口的正文请求中核对到/);

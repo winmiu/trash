@@ -49,6 +49,30 @@ test('only the completed current-floor marker is removed, including on continuat
     assert.equal(readRecord('<!--FD-abc 未完成\n正文<!-- other -->','abc'),null);
 });
 
+test('action and combat bind the stated goal and both outcomes to the floor, leaving narration to the preset', () => {
+    const pool = {items:[], order:[]};
+    const target = '目标：把信交到对方手中，依据：对方就在面前';
+    for (const die of [50, 51]) {
+        const turn = {die, events:pool, reactions:pool, token:'floor'};
+        for (const branch of ['行|一般|中性', '战|一般|相当|中性|1']) {
+            const record = branch + '|' + (die === 50 ? '50%成' : '50%败') + '|' + target;
+            const verdict = confirmVerdict(turn, record);
+            assert.ok(verdict[0].includes(target));
+            assert.match(verdict[0], die === 50 ? /50 ≤ 50，成功/ : /51 > 50，失败/);
+            for (const prompt of [storyPrompt(turn), storyPrompt({...turn, verdict})]) {
+                for (const rule of ['本楼目标已达成', '不能换人或换方法达成同一目标', '不得以拦截、补救或反转抵消成败', '续写承接已写事实', '挽回须等玩家下一条消息再判', '篇幅、文风与格式均依主预设']) {
+                    assert.ok(prompt.includes(rule), rule);
+                }
+            }
+            assert.ok(storyPrompt({...turn, verdict}).includes(target));
+        }
+    }
+    assert.match(storyPrompt({verdict:['行动 · 旧楼。d100=88 / 阈值 1%，失败。']}), /挽回须等玩家下一条消息再判/);
+    for (const summary of ['本轮无需判定 · 正在寒暄。', '暂缓判定 · 来者身份不明。', '事件 · 正值交班。']) {
+        assert.doesNotMatch(storyPrompt({verdict:[summary]}), /同一目标|补救或反转/);
+    }
+});
+
 test('disabled and zero-weight entries are excluded while custom entries retain all three coefficients', () => {
     const pool=storyPool([
         {enabled:true,weight:10,name:'协商',id:'a'}, {enabled:true,weight:10,name:'观望',id:'b'},
