@@ -2,8 +2,9 @@ import { COMBAT_PROFILES, DIFFICULTY, detectKind, combatOdds, actionOdds, rollD1
 import { beginRun, assessmentText, resultText, errorText, RefereeStopped } from './run-log.js';
 import { requestReferee } from './referee-request.js';
 import { apiAddress, independentConnection, refereeKey } from './referee-api.js';
+import { storyPool, poolResult, storyPrompt, storyActions, confirmStory, readReceipt } from './story-turn.js';
 /**
- * Fair Dice v1.6.0 — SillyTavern extension with an optional separate referee connection.
+ * Fair Dice v1.7.0 — SillyTavern dice and scene-aware weights.
  * Installed in data/<user>/extensions/fair-dice or public/scripts/extensions/third-party/fair-dice.
  */
 const MODULE_KEY = 'fair_dice_winmiu_v1';
@@ -77,6 +78,8 @@ const DEFAULTS = {
     fairness: true,
     autoJudge: true, // Recommended: independent referee classifies before rolling; extra model call when enabled for the chat.
     compactJudge: true,
+    storyMode: false, // Existing installations retain their chosen referee.
+    storyTurns: {},
     refereeApi: 'main',
     refereeAddress: '',
     refereeModel: '',
@@ -100,6 +103,7 @@ let root = null;
 let listenersAttached = false;
 let normalizedReference = null;
 let activeReferee = null;
+let pendingStory = null;
 const waitingForInterceptor = new Map();
 const generationNames = { normal: '正常生成', regenerate: '重新生成', swipe: '切换候选回复', continue: '继续生成' };
 
@@ -113,6 +117,7 @@ function startLog(cfg, key, title) {
 function generationStarted(type = 'normal', _options, dryRun) {
     if (dryRun || activeReferee || ['quiet', 'impersonate'].includes(type) || !isEnabledHere()) return;
     const key = chatKey();
+    pendingStory = null;
     const previous = waitingForInterceptor.get(key);
     if (previous) previous.log('下一次生成已开始，上一次没有进入自动判定。', 'notice');
     const log = startLog(initSettings(), key, generationNames[type] || '酒馆生成');
@@ -121,6 +126,17 @@ function generationStarted(type = 'normal', _options, dryRun) {
 }
 
 function generationEnded() {
+    // Streaming 1.16 announces the end before MESSAGE_RECEIVED. Give that callback time to arrive.
+    const story = pendingStory;
+    if (story && !story.fixed && !story.stopped && !story.endCheck) {
+        story.endCheck = setTimeout(() => {
+            if (pendingStory !== story || story.stopped || story.key !== chatKey()) return;
+            story.turn.unconfirmed = true;
+            story.log('酒馆已结束生成，尚未收到可确认的正文记录。', 'notice');
+            clearInjection();
+            updateScope();
+        }, 1500);
+    }
     const key = chatKey();
     const pending = waitingForInterceptor.get(key);
     if (!pending || activeReferee) return;
@@ -130,6 +146,7 @@ function generationEnded() {
 
 function chatChanged() {
     const current = chatKey();
+    if (pendingStory?.key !== current) pendingStory = null;
     for (const [key, pending] of waitingForInterceptor) {
         if (key === current) continue;
         waitingForInterceptor.delete(key);
@@ -179,6 +196,7 @@ function initSettings() {
         if (!Object.hasOwn(data, k)) data[k] = clone(v);
     }
     if (justCreated) {
+        data.storyMode = true;
         data.events = rowsFromPreset(BUILT_INS.balanced.events);
         data.reactions = rowsFromPreset(BUILT_INS.balanced.reactions);
     }
@@ -198,7 +216,7 @@ function initSettings() {
     if (!data.enabledChats || typeof data.enabledChats !== 'object') data.enabledChats = {};
     if (!data.rolls || typeof data.rolls !== 'object') data.rolls = {};
     if (!data.queued || typeof data.queued !== 'object') data.queued = {};
-    for (const key of ['modeByChat','manualChecks','assessments','chatProfiles']) if (!data[key] || typeof data[key] !== 'object') data[key] = {};
+    for (const key of ['modeByChat','manualChecks','assessments','chatProfiles','storyTurns']) if (!data[key] || typeof data[key] !== 'object') data[key] = {};
     return data;
 }
 /** Every chat owns its own weighted story profile. Legacy settings provide the migration baseline. */
@@ -292,7 +310,7 @@ function checkMode(cfg, key) {
 function inputForChat(cfg, key) {
     return { actorLevel:null, opponentLevel:null, opponentCount:1, modifier:0, difficulty:'normal', ...(cfg.manualChecks?.[key]||{}) };
 }
-function prepareCheck(cfg, key, mode) {
+function prepareCheck(cfg, key, mode, dice) {
     const custom = inputForChat(cfg,key);
     const assessed = cfg.assessments?.[key]?.round === roundKey() ? cfg.assessments[key] : null;
     const kind = mode === 'combat' ? 'combat' : 'action';
@@ -316,7 +334,7 @@ function prepareCheck(cfg, key, mode) {
         });
     }
     const pending = kind === 'combat' && (!odds.knownA || !odds.knownB) && !cfg.allowUnknownCombat;
-    return { kind, odds, ...(pending ? { chance:null, roll:null, success:null, degree:'待评估', margin:null } : resolveCheck(odds.probability, rollD100())), pending, assessment: assessed?.summary || '', evaluated: Boolean(assessed) };
+    return { kind, odds, ...(pending ? { chance:null, roll:null, success:null, degree:'待评估', margin:null } : resolveCheck(odds.probability, dice ?? rollD100(rand01))), pending, assessment: assessed?.summary || '', evaluated: Boolean(assessed) };
 }
 function drawBundle(cfg, key) {
     const profile = profileFor(cfg, key);
@@ -356,7 +374,7 @@ function roundKey() {
 function useRoll(cfg, key) {
     const rk = roundKey();
     const cached = cfg.rolls[key];
-    if (cached?.round === rk && cached?.bundle) return cached.bundle;
+    if (!cfg.queued[key] && cached?.round === rk && cached?.bundle) return cached.bundle;
     const bundle = cfg.queued[key] || drawBundle(cfg, key);
     delete cfg.queued[key];
     if (bundle.judgeError) return bundle;
@@ -430,7 +448,118 @@ async function assessScene(cfg, key, round, log, automatic) {
     return result;
 }
 
-// Registered from manifest.json. This runs before prompt assembly, never edits the chat array.
+function prepareStory(cfg, key, round, log) {
+    const ctx = context();
+    const card = ctx.characters?.[ctx.characterId];
+    const profile = profileFor(cfg, key);
+    const mode = cfg.modeByChat[key] || 'auto';
+    const manual = inputForChat(cfg, key);
+    // A different prior swipe, speaker, card definition or edited settings starts a new draw.
+    const player = ctx.chat.findLastIndex(m => m?.is_user);
+    const prior = ctx.chat.slice(0, player < 0 ? ctx.chat.length : player).findLast(m=>m && !m.is_user && !m.is_system);
+    const signature = stringHash(JSON.stringify([round, prior?.mes, card?.avatar, card?.data?.description ?? card?.description,
+        card?.data?.personality ?? card?.personality, card?.data?.scenario ?? card?.scenario, manual, mode,
+        cfg.combatProfile, cfg.allowUnknownCombat, cfg.fairness, cfg.eventDice, cfg.npcDice, cfg.actionDice, cfg.combatDice,
+        profile.events, profile.reactions]));
+    let turn = cfg.storyTurns[key];
+    if (!turn || turn.signature !== signature) {
+        const dice = rollD100(rand01);
+        const allowed = kind => mode === 'auto' || kind === mode;
+        turn = {
+            signature, round, token:Array.from({length:2},()=>Math.floor(rand01()*4294967296).toString(16).padStart(8,'0')).join(''),
+            fairness:cfg.fairness, mode,
+            events:storyPool(cfg.eventDice && allowed('narrative') ? profile.events : [], 'E', rand01),
+            reactions:storyPool(cfg.npcDice && allowed('narrative') ? profile.reactions : [], 'N', rand01),
+            actions:cfg.actionDice && allowed('action') ? storyActions(manual, dice) : [],
+            combat:cfg.combatDice && allowed('combat') ? prepareCheck(cfg,key,'combat',dice) : null,
+        };
+        delete cfg.storyTurns[key];
+        cfg.storyTurns[key] = turn;
+        const keys = Object.keys(cfg.storyTurns);
+        if (keys.length > 60) delete cfg.storyTurns[keys[0]];
+        persist();
+    }
+    if (!writeInjection(storyPrompt(turn, turn.confirmed))) {
+        log('酒馆未提供正文提示词接口，未提交本轮候选。', 'error');
+        return;
+    }
+    pendingStory = { key, turn, log, fixed:Boolean(turn.confirmed) };
+    if (turn.confirmed) {
+        log('复用本回合已确认的系数和结果。' + turn.confirmed.summary);
+    } else {
+        log('已把本机候选交给正文模型，等待同一条回复确认。扩展额外请求 0 次。');
+    }
+    updateScope();
+}
+
+function storyReceived(id, type) {
+    if (['quiet','impersonate','first_message'].includes(type)) return;
+    const pending = pendingStory;
+    if (!pending || pending.key !== chatKey()) return;
+    const ctx = context(), msg = ctx.chat?.[id];
+    if (typeof msg?.mes !== 'string' || msg.is_user || msg.is_system || Number(id) !== ctx.chat.length - 1) return;
+    const cfg = initSettings();
+    if (!cfg.storyMode || cfg.storyTurns[pending.key] !== pending.turn || !isEnabledHere()) return;
+    const receipt = readReceipt(msg.mes, pending.turn.token);
+    // A delayed helper or earlier generation can arrive after another turn started.
+    if (!receipt && /<!--FD-[0-9a-f]{16}\s[^\n]*$/i.test(msg.mes.trimEnd().slice(-2200))) return;
+    pendingStory = null;
+    clearInjection();
+    if (receipt) {
+        msg.mes = receipt.body;
+        const swipe = msg.swipe_id;
+        if (Number.isInteger(swipe) && Array.isArray(msg.swipes)) msg.swipes[swipe] = receipt.body;
+        const display = readReceipt(msg.extra?.display_text, pending.turn.token);
+        if (display) msg.extra.display_text = display.body;
+        ctx.updateMessageBlock?.(id, msg);
+    }
+    if (pending.stopped || (pending.turn.round.startsWith('user:') && pending.turn.round !== roundKey())) return;
+    if (pending.fixed) {
+        rememberStory(pending.turn, msg.mes, pending.turn.confirmed);
+        persist();
+        return;
+    }
+    const confirmed = receipt && confirmStory(pending.turn, receipt.value);
+    if (!confirmed) {
+        delete pending.turn.confirmed;
+        pending.turn.unconfirmed = true;
+        pending.log('正文判定未确认（记录缺失、格式无效或抽签编号不符）。保留正文，本轮未追加模型请求。', 'notice');
+    } else {
+        pending.turn.confirmed = confirmed;
+        delete pending.turn.unconfirmed;
+        pending.log(confirmed.summary);
+        const adjusted = [pending.turn.events, pending.turn.reactions].flatMap(pool =>
+            poolResult(pool, confirmed.up, confirmed.down).rows.filter(r=>r.factor !== 1)
+                .map(r=>r.name + ' ×' + r.factor + '（' + r.pct.toFixed(1) + '%）'));
+        pending.log(adjusted.length ? '本轮自适应：' + adjusted.join('、') : '本轮采用基础权重，系数均为 1。');
+    }
+    rememberStory(pending.turn, msg.mes, confirmed);
+    persist(); updateScope();
+}
+
+function rememberStory(turn, body, confirmed) {
+    turn.variants ??= {};
+    turn.variants[stringHash(body)] = confirmed || null;
+    const hashes = Object.keys(turn.variants);
+    if (hashes.length > 20) delete turn.variants[hashes[0]];
+}
+
+function storySwiped(id) {
+    if (pendingStory || !isEnabledHere()) return;
+    const cfg = initSettings(), key = chatKey(), ctx = context();
+    const turn = cfg.storyMode && cfg.storyTurns[key], msg = ctx.chat?.[id];
+    if (!turn || turn.round !== roundKey() || Number(id) !== ctx.chat.length - 1 || typeof msg?.mes !== 'string' || msg.is_user) return;
+    if (readReceipt(msg.mes, turn.token)) {
+        pendingStory = { key, turn, log:startLog(cfg, key, '切换候选回复') };
+        storyReceived(id, 'swipe');
+    } else if (turn.variants && Object.hasOwn(turn.variants, stringHash(msg.mes))) {
+        turn.confirmed = turn.variants[stringHash(msg.mes)];
+        turn.unconfirmed = !turn.confirmed;
+        persist(); updateScope();
+    }
+}
+
+// Registered from manifest.json. Runs before prompt assembly.
 globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize, abort, type = 'normal') {
     if (['quiet', 'impersonate'].includes(type)) return;
     if (activeReferee) {
@@ -446,6 +575,10 @@ globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize,
     try {
         log('已进入自动判定。');
         const cached = cfg.rolls[key]?.round === round && cfg.rolls[key]?.bundle;
+        if (cfg.storyMode && !cfg.queued[key] && !cached) {
+            prepareStory(cfg, key, round, log);
+            return;
+        }
         if (cfg.queued[key]) {
             log('使用已手动锁定的结果。');
         } else if (cached) {
@@ -522,7 +655,7 @@ function customize(cfg) {
 }
 function invalidateRoll(cfg) {
     const key = chatKey();
-    if (key) { delete cfg.rolls[key]; delete cfg.queued[key]; }
+    if (key) { delete cfg.rolls[key]; delete cfg.queued[key]; delete cfg.storyTurns[key]; }
 }
 function applyPreset(value) {
     const cfg = initSettings();
@@ -696,8 +829,11 @@ function updatePercentages() {
     const cfg = initSettings();
     if (!cfg || !root) return;
     const profile = profileFor(cfg);
+    const turn = cfg.storyMode && cfg.storyTurns[chatKey()];
     for (const kind of ['events', 'reactions']) {
         const rows = profile[kind];
+        const confirmed = turn?.confirmed;
+        const effective = confirmed ? poolResult(turn[kind], confirmed.up, confirmed.down).rows : [];
         const total = activeRows(rows).reduce((a, r) => a + r.weight, 0);
         const parent = root.querySelector(`#fd-${kind}-rows`);
         if (!parent) continue;
@@ -707,6 +843,11 @@ function updatePercentages() {
             const p = node.querySelector('.fd-percent');
             if (!p || !item) return;
             p.textContent = item.enabled && cleanText(item.name) && total > 0 ? `${Math.round(item.weight / total * 1000) / 10}%` : '0%';
+            const adapted = effective.find(row => row.id === item.id && row.weight === item.weight);
+            if (adapted) {
+                p.textContent = adapted.pct.toFixed(1) + '%';
+                p.title = '最近确认的系数 ×' + adapted.factor + '，基础权重 ' + item.weight;
+            } else p.title = '基础概率';
             node.classList.toggle('fd-muted', !item.enabled || item.weight === 0);
         });
     }
@@ -719,11 +860,18 @@ function updateResult() {
     if (!c || !cfg) return;
     const queued = key && cfg.queued[key];
     const drawn = queued || (key && cfg.rolls[key]?.bundle);
+    const turn = cfg.storyMode && cfg.storyTurns[key];
     const cancel = root.querySelector('#fd-unqueue');
     if (cancel) cancel.hidden = !queued;
     const failed = Boolean(key && cfg.assessments[key]?.round === roundKey() && cfg.assessments[key]?.error);
-    c.hidden = !drawn && !failed;
+    c.hidden = !drawn && !failed && !turn;
     c.replaceChildren();
+    if (turn && !queued && cfg.rolls[key]?.round !== turn.round) {
+        c.append(el('span','fd-result-tag','正文内判定'));
+        c.append(el('div','fd-result-lines', turn.confirmed?.summary ||
+            (turn.unconfirmed ? '本轮判定未确认，可查看运行日志。' : '候选已就绪，等待正文确认。')));
+        return;
+    }
     if (!drawn && failed) {
         c.textContent = '裁判评估未完成。下次生成会重新请求裁判。';
         return;
@@ -744,7 +892,7 @@ function renderRunLog() {
     const history = cfg.runLogs?.[key];
     const enabled = extensionActive && cfg.enabledChats[key];
     status.textContent = '扩展已加载 · ' + (enabled ? '当前聊天已启用' : '当前聊天已关闭') +
-        ' · 前置 AI 裁判' + (cfg.autoJudge ? '已开启' : '已关闭');
+        ' · ' + (cfg.storyMode ? '正文内判定 · 单次请求' : '前置 AI 裁判' + (cfg.autoJudge ? '已开启' : '已关闭'));
     if (!Array.isArray(history) || !history.length) {
         list.append(el('p', '', enabled ? '尚无运行记录，等待下一次酒馆生成。' : '尚无运行记录。启用当前聊天后开始记录自动判定。'));
         return;
@@ -769,13 +917,14 @@ function updateScope() {
     const key = chatKey();
     const label = root.querySelector('#fd-scope');
     const toggle = root.querySelector('#fd-enabled');
-    const method = cfg.autoJudge ? (cfg.compactJudge ? 'compact' : 'full') : 'local';
+    const method = cfg.storyMode ? 'story' : cfg.autoJudge ? (cfg.compactJudge ? 'compact' : 'full') : 'local';
     const refereeSelect = root.querySelector('#fd-referee');
     if (refereeSelect) refereeSelect.value = method;
     const apiSelect = root.querySelector('#fd-api');
     if (apiSelect) {
         apiSelect.value = cfg.refereeApi;
-        root.querySelector('#fd-api-fields').hidden = cfg.refereeApi !== 'independent';
+        apiSelect.parentElement.hidden = cfg.storyMode;
+        root.querySelector('#fd-api-fields').hidden = cfg.storyMode || cfg.refereeApi !== 'independent';
         const address = root.querySelector('#fd-api-address');
         const model = root.querySelector('#fd-api-model');
         const keyInput = root.querySelector('#fd-api-key');
@@ -785,7 +934,7 @@ function updateScope() {
         if (document.activeElement !== keyInput) keyInput.value = refereeKey(context(), cfg.refereeAddress);
     }
     if (label) {
-        const note = { compact:'精简 AI 裁判 · 失败最多重试 3 次', full:'完整 AI 裁判 · 失败最多重试 3 次', local:'本地规则自动判定' };
+        const note = { story:'正文内判定 · 一次请求 · 权重随剧情调整', compact:'精简 AI 裁判 · 失败最多重试 3 次', full:'完整 AI 裁判 · 失败最多重试 3 次', local:'本地规则自动判定' };
         label.textContent = !key ? '请先打开一个聊天。' : cfg.enabledChats[key] ? note[method] : '开启后，生成回复时自动判定。';
     }
     if (toggle) {
@@ -806,6 +955,11 @@ function updateScope() {
         const inp = root.querySelector(`#fd-${id}`);
         if (inp) inp.checked = Boolean(cfg[id]);
     }
+    const analyze = root.querySelector('#fd-analyze');
+    if (analyze) analyze.hidden = cfg.storyMode;
+    const manualHelp = root.querySelector('#fd-manual-help');
+    if (manualHelp) manualHelp.textContent = cfg.storyMode ? '锁定后下一次正文沿用该结果。' : '评估会调用模型。锁定结果用于下一次回复。';
+    updatePercentages();
     updateResult();
     renderRunLog();
 }
@@ -876,7 +1030,7 @@ function buildUI() {
           <details class="fd-drawer" id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><div class="fd-log-list"></div></details>
           <details class="fd-drawer fd-judge"><summary>判定设置</summary>
             <p class="fd-help">以下设置用于所有已启用的聊天。</p>
-            <label class="fd-select">裁判方式<select id="fd-referee"><option value="compact">AI · 精简上下文</option><option value="full">AI · 完整上下文</option><option value="local">本地规则</option></select></label>
+            <label class="fd-select">裁判方式<select id="fd-referee"><option value="story">正文内判定 · 一次请求</option><option value="compact">前置 AI · 精简上下文</option><option value="full">前置 AI · 完整上下文</option><option value="local">本地规则</option></select></label>
             <label class="fd-select">裁判 API<select id="fd-api"><option value="main">跟随正文</option><option value="independent">独立 API</option></select></label>
             <div id="fd-api-fields" hidden>
               <label>接口地址<input id="fd-api-address" type="url" placeholder="https://…/v1" autocomplete="off" spellcheck="false" /></label>
@@ -895,7 +1049,7 @@ function buildUI() {
             <label class="fd-unknown"><input id="fd-allowUnknownCombat" type="checkbox" /> 战力未知时也允许检定</label>
           </details>
           <details class="fd-drawer fd-judge"><summary>手动判定</summary>
-            <p class="fd-help">仅用于当前聊天。战力可留空，由裁判评估。</p>
+            <p class="fd-help">仅用于当前聊天。正文内判定遇到未知战力时，默认暂缓胜负。</p>
             <label class="fd-select">判定模式<select id="fd-mode"><option value="auto">自动识别</option><option value="narrative">事件走向</option><option value="action">行动检定</option><option value="combat">战斗检定</option></select></label>
             <div class="fd-fields">
               <label>行动方战力<input id="fd-actor" type="number" min="0" max="100" placeholder="0–100" /></label>
@@ -905,18 +1059,18 @@ function buildUI() {
               <label>行动难度<select id="fd-difficulty"><option value="trivial">很容易</option><option value="easy">容易</option><option value="normal">一般</option><option value="hard">困难</option><option value="extreme">极难</option><option value="impossible">不可能</option></select></label>
             </div>
             <div class="fd-roll-actions"><button class="fd-btn" id="fd-analyze" type="button">AI 评估场景</button><button class="fd-btn" id="fd-roll" type="button">抽取并锁定</button><button class="fd-btn" id="fd-unqueue" type="button" hidden>取消锁定</button></div>
-            <p class="fd-help">评估会调用模型。锁定结果用于下一次回复。</p>
+            <p class="fd-help" id="fd-manual-help">评估会调用模型。锁定结果用于下一次回复。</p>
             <div id="fd-assessment" class="fd-assessment"></div>
           </details>
           <details class="fd-drawer"><summary>事件与反应权重</summary>
             <div class="fd-presets"><label for="fd-preset">本聊天预设</label><select id="fd-preset"><option value="balanced">公平中立</option><option value="slice">生活日常</option><option value="dynamic">变化较多</option><option value="custom">自定义</option></select></div>
-            <p class="fd-help">直接输入权重（0–200），概率按已启用项目自动换算。</p>
+            <p class="fd-help">填基础权重（0–200）。正文内判定会显示最近确认的实际概率，系数见运行日志。</p>
             <details class="fd-list"><summary>事件走向</summary><div id="fd-events-rows" class="fd-rows"></div><button id="fd-add-events" class="fd-btn" type="button">添加事件</button></details>
             <details class="fd-list"><summary>NPC 反应</summary><div id="fd-reactions-rows" class="fd-rows"></div><button id="fd-add-reactions" class="fd-btn" type="button">添加反应</button></details>
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v1.6.0</span> winmiu</small>
+            <small class="fd-signature"><span>v1.7.0</span> winmiu</small>
           </footer>
         </div>
       </details>`;
@@ -926,7 +1080,7 @@ function buildUI() {
         const cfg = initSettings(), key = chatKey();
         if (!cfg || !key) return;
         cfg.enabledChats[key] = e.target.checked;
-        if (!e.target.checked) activeReferee?.abort();
+        if (!e.target.checked) { activeReferee?.abort(); pendingStory = null; }
         startLog(cfg, key, '聊天开关')(e.target.checked ? '已启用，等待下一次正常生成。' : '已关闭本聊天的自动判定。');
         delete cfg.rolls[key];
         if (!e.target.checked) { delete cfg.queued[key]; clearInjection(); }
@@ -940,8 +1094,13 @@ function buildUI() {
         activeReferee?.abort();
         const cfg = initSettings();
         const method = e.target.value;
+        pendingStory = null;
+        clearInjection();
+        cfg.storyMode = method === 'story';
+        invalidateRoll(cfg);
+        if (chatKey()) delete cfg.assessments[chatKey()];
         const useAI = method !== 'local';
-        if (useAI) cfg.compactJudge = method === 'compact';
+        if (useAI && !cfg.storyMode) cfg.compactJudge = method === 'compact';
         if (useAI !== cfg.autoJudge) changeSetting('autoJudge', useAI);
         else persist();
         updateScope();
@@ -1014,7 +1173,18 @@ export function onActivate() {
     activationRegistered = true;
     const types = c.eventTypes || c.event_types || {};
     if (types.GENERATION_STARTED) c.eventSource.on(types.GENERATION_STARTED, generationStarted);
-    if (types.GENERATION_STOPPED) c.eventSource.on(types.GENERATION_STOPPED, generationEnded);
+    if (types.GENERATION_STOPPED) c.eventSource.on(types.GENERATION_STOPPED, () => {
+        if (pendingStory && !pendingStory.fixed) {
+            pendingStory.stopped = true;
+            pendingStory.turn.unconfirmed = true;
+            pendingStory.log('生成已停止，本次判定未确认。', 'notice');
+            clearInjection();
+            updateScope();
+        }
+        generationEnded();
+    });
+    if (types.MESSAGE_RECEIVED) c.eventSource.on(types.MESSAGE_RECEIVED, storyReceived);
+    if (types.MESSAGE_SWIPED) c.eventSource.on(types.MESSAGE_SWIPED, storySwiped);
     if (types.GENERATION_ENDED) c.eventSource.on(types.GENERATION_ENDED, generationEnded);
     const ready = types.APP_READY;
     if (ready) c.eventSource.on(ready, init);
@@ -1023,7 +1193,7 @@ export function onActivate() {
     else document.addEventListener('DOMContentLoaded', init, { once: true });
 }
 export function onEnable() { extensionActive = true; init(); updateScope(); }
-export function onDisable() { extensionActive = false; activeReferee?.abort(); clearInjection(); updateScope(); }
+export function onDisable() { extensionActive = false; pendingStory = null; activeReferee?.abort(); clearInjection(); updateScope(); }
 
 // SillyTavern 1.16.0 activates the extension by inserting its module script.
 // A dynamic import for a lifecycle hook can occur independently of activation.
