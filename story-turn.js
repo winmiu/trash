@@ -1,6 +1,7 @@
 import { auditText, checkInstructions, checkVerdict } from './scene-check.js';
 
 const floorOutcomeRule = '行动或交锋成功，正文须写成本楼目标已达成；失败则目标未达成，不能换人或换方法达成同一目标。同楼事件和人物反应不得以拦截、补救或反转抵消成败。重生成沿用裁定，续写承接已写事实；挽回须等玩家下一条消息再判。其余剧情、人物反应、篇幅、文风与格式均依主预设。';
+const hideCheckDetails = '正文用剧情体现成败，不展示骰点、阈值或判定行。';
 
 // In an exponential race the smallest clock wins with probability w_i / sum(w).
 // Scaling a clock by 1/factor implements the new weight using the same random draw.
@@ -32,7 +33,7 @@ export function storyPrompt(turn, omittedNotes, judge = false) {
     if (turn.verdict?.length && !judge) {
         const verdict = '【公平骰·本楼裁定】' + turn.verdict.join(' ');
         if (!auditText(turn.verdict)) return verdict + ' 依主预设写故事。';
-        return verdict + ' ' + floorOutcomeRule + ' 若说明成败，写出骰点与数值阈值的比较。';
+        return verdict + ' ' + floorOutcomeRule + hideCheckDetails;
     }
     const lines = [
         '【公平骰】按人设与当前情境判一次：闲聊/既定事实略过；行、战先定本楼实际尝试的动作和对象，不把动机或后续结果算作目标。行动看任务门槛及专长工具，交锋按目标比较双方能力、状态和实际人数，无数值用已知表现，依据不足暂缓。',
@@ -46,7 +47,7 @@ export function storyPrompt(turn, omittedNotes, judge = false) {
     const result = judge ? '*' : '阈值%成或败';
     lines.push('行|难度|不利/中性/有利|' + result + '|目标：动作及对象，依据：事实；战|世界|强弱|临场|对手人数|' + result + '|目标：动作及对象，依据：事实；略或缓|事实。只填适用项，依据一句。');
     lines.push(judge ? '只交裁定行，独立项用分号。不要故事。' :
-        floorOutcomeRule + '说明检定时写“d100点数、成功阈值N%、点数与N的比较、成败”。附 <!--FD-' + turn.token + ' 裁定行 -->。');
+        floorOutcomeRule + hideCheckDetails + '在回复末尾附隐藏记录 <!--FD-' + turn.token + ' 裁定行 -->。');
     return lines.join('\n');
 }
 

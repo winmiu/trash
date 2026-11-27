@@ -57,6 +57,8 @@ test('legacy and fresh installations only inject into the host request', async (
                 assert.equal(body.mes,story);
                 assert.equal(body.swipes[0],body.mes);
                 assert.match(body.extra.fairDiceAudit.text,/成功阈值 50%/);
+                const steps = cfg.runLogs[key][0].steps;
+                assert.ok(steps.some(step => step.text.endsWith(body.extra.fairDiceAudit.text.split(' · ')[1])));
                 return input;
             }
             const input = hostReply('normal');
@@ -66,12 +68,14 @@ test('legacy and fresh installations only inject into the host request', async (
                 assert.ok(input[0].includes(rule), rule);
             }
             assert.match(input[0],/挽回须等玩家下一条消息再判/);
+            assert.match(input[0],/正文用剧情体现成败，不展示骰点、阈值或判定行/);
             assert.doesNotMatch(input[0],/OLD-CONSEQUENCE|stakes|大败|大成|致命|失败可带来/);
             assert.equal(requests.length,1);
             assert.deepEqual(ctx.extensionPrompts,{});
             assert.equal(events.listenerCount('received'),1);
             const fixed = hostReply('regenerate');
             assert.match(fixed[0],/本楼裁定[\s\S]*目标：修好计分器[\s\S]*阈值 50%[\s\S]*挽回须等玩家下一条消息再判/);
+            assert.match(fixed[0],/正文用剧情体现成败，不展示骰点、阈值或判定行/);
             assert.doesNotMatch(fixed[0],/候选顺序|<!--FD/);
             ctx.chat.splice(1); // delete the replies and reload the stored player message
             ctx.chat = JSON.parse(JSON.stringify(ctx.chat));

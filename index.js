@@ -4,7 +4,7 @@ import { confirmVerdict, disputedCheck, readRecord, storyPool, storyPrompt } fro
 import { placeInChat, presentIn } from './delivery.js';
 import { judgeFloor, supportedProfiles } from './profile-judge.js';
 import { customKey, normalizeAddress, JudgeConfigError } from './judge-api.js';
-import { saveAudit, renderAudits, stringHash } from './reply-audit.js';
+import { saveAudit, stringHash } from './reply-audit.js';
 
 const MODULE_KEY = 'fair_dice_winmiu_v1';
 const PROMPT_KEY = 'fair_dice_winmiu_injection_v1';
@@ -187,7 +187,6 @@ function chatChanged() {
     clearInjection();
     renderRows();
     updateScope();
-    renderAudits(context(), isEnabledHere());
 }
 
 function rand01() {
@@ -314,7 +313,6 @@ function receiveVerdict(id, type) {
     if (pending.fixed) {
         finishPending();
         saveAudit(msg,pending.turn,pending.turn.verdict);
-        renderAudits(ctx,true,Number(id));
         ctx.saveMetadataDebounced?.();
         return;
     }
@@ -352,7 +350,6 @@ function receiveVerdict(id, type) {
     }
     ctx.saveMetadataDebounced?.();
     if (item) ctx.updateMessageBlock?.(id, msg);
-    renderAudits(ctx,true,Number(id));
 }
 
 // SillyTavern reads this one named prompt while assembling its own generation request.
@@ -688,7 +685,7 @@ function buildUI() {
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v2.2.1</span> winmiu</small>
+            <small class="fd-signature"><span>v2.2.2</span> winmiu</small>
           </footer>
         </div>
       </details>`;
@@ -729,7 +726,7 @@ function buildUI() {
         if (!cfg || !key) return;
         cfg.enabledChats[key] = e.target.checked;
         if (!e.target.checked) { judgeJob?.abort(); finishPending(); clearInjection(); }
-        persist(); updateScope(); renderAudits(context(),isEnabledHere());
+        persist(); updateScope();
     });
     root.querySelector('#fd-preset').addEventListener('change', e => applyPreset(e.target.value));
     root.querySelector('#fd-add-events').addEventListener('click', () => addRow('events'));
@@ -742,7 +739,6 @@ function init() {
     initSettings();
     if (!root) buildUI();
     updateScope();
-    renderAudits(context(),isEnabledHere());
 }
 
 export function onActivate() {
@@ -750,12 +746,6 @@ export function onActivate() {
     if (activationRegistered || !ctx?.eventSource?.on) return;
     activationRegistered = true;
     const types = ctx.eventTypes || ctx.event_types || {};
-    for (const event of [types.CHARACTER_MESSAGE_RENDERED, types.MESSAGE_SWIPED]) {
-        if (event) ctx.eventSource.on(event, id => renderAudits(context(),isEnabledHere(),Number(id)));
-    }
-    for (const event of [types.CHAT_LOADED, types.MORE_MESSAGES_LOADED]) {
-        if (event) ctx.eventSource.on(event, () => renderAudits(context(),isEnabledHere()));
-    }
     if (types.GENERATE_AFTER_DATA) ctx.eventSource.on(types.GENERATE_AFTER_DATA, afterData);
     if (types.CHAT_COMPLETION_SETTINGS_READY) ctx.eventSource.on(types.CHAT_COMPLETION_SETTINGS_READY, checkOutgoing);
     if (types.MESSAGE_RECEIVED) ctx.eventSource.on(types.MESSAGE_RECEIVED, receiveVerdict);
@@ -772,7 +762,7 @@ export function onActivate() {
     if (document.readyState !== 'loading') init();
     else document.addEventListener('DOMContentLoaded', init, {once:true});
 }
-export function onEnable() { extensionActive = true; init(); renderAudits(context(),isEnabledHere()); }
-export function onDisable() { extensionActive = false; judgeJob?.abort(); finishPending(); clearInjection(); updateScope(); renderAudits(context(),false); }
+export function onEnable() { extensionActive = true; init(); }
+export function onDisable() { extensionActive = false; judgeJob?.abort(); finishPending(); clearInjection(); updateScope(); }
 
 if (typeof document !== 'undefined' && Array.from(document.scripts).some(s => s.src === import.meta.url)) onActivate();

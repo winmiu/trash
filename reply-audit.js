@@ -24,18 +24,3 @@ export function saveAudit(message, turn, verdict, disputed = '') {
     }
 }
 
-export function renderAudits(ctx, enabled, id) {
-    if (!ctx?.chat || !document.querySelectorAll) return;
-    const selector = Number.isInteger(id) ? '#chat .mes[mesid="' + id + '"]' : '#chat .mes[mesid]';
-    for (const row of document.querySelectorAll(selector)) {
-        const msg = ctx.chat[Number(row.getAttribute('mesid'))];
-        const audit = enabled && !msg?.is_user && msg?.extra?.[key];
-        const text = audit && audit.body === stringHash(msg.mes ?? '') && audit.text;
-        const old = row.querySelector('.fd-reply-audit');
-        if (typeof text !== 'string' || !text) { old?.remove(); continue; }
-        const note = old || document.createElement('small');
-        note.className = 'fd-reply-audit';
-        note.textContent = '公平骰 · ' + text;
-        if (!old) row.querySelector('.mes_text')?.after(note);
-    }
-}
