@@ -1,32 +1,36 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { actionOdds, DIFFICULTY } from '../engine.js';
-import { checkInstructions } from '../scene-check.js';
-import { confirmVerdict, readRecord, storyPool, storyPrompt } from '../story-turn.js';
+import { auditText, checkInstructions } from '../scene-check.js';
+import { confirmVerdict, disputedCheck, readRecord, storyPool, storyPrompt } from '../story-turn.js';
 
-test('the three compact action cutoffs reproduce the same odds at every roll', () => {
-    for (let die=1; die<=100; die++) {
-        const limits = /最多成功到([^；]+)/.exec(checkInstructions(die))[1].split('/');
-        const options = Object.entries(DIFFICULTY);
-        for (const [column, modifier] of [-15,0,15].entries()) {
-            const last = options.findIndex(([,d]) => d.name === limits[column]);
-            for (const [i,[difficulty]] of options.entries()) {
-                assert.equal(i <= last, die <= actionOdds({difficulty,modifier}).probability);
-            }
+test('action rule names, numerical base chances and boundary comparisons match the engine', () => {
+    const turn={die:88};
+    assert.match(checkInstructions(88),/基值90\/70\/50\/30\/10\/0/);
+    for (const [difficulty,entry] of Object.entries(DIFFICULTY)) {
+        for (const [state,modifier] of [['不利',-15],['中性',0],['有利',15]]) {
+            const n=actionOdds({difficulty,modifier}).probability;
+            const result=n>=88?'成':'败';
+            const verdict=confirmVerdict(turn,['行',entry.name,state,n+'%'+result,'修理古钟'].join('|'));
+            assert.ok(auditText(verdict).includes('成功阈值 '+n+'%，88 '+(n>=88?'≤':'>')+' '+n));
         }
     }
+    assert.match(auditText(confirmVerdict({die:50},'行|一般|中性|50%成功|修理古钟')),/50 ≤ 50，成功/);
+    assert.match(auditText(['行动 · 旧楼。d100=88 / 阈值 1%，失败。']),/88 > 1，失败/);
+    assert.match(disputedCheck(turn,'行|极难|不利|5%败|工具不合适'),/复核.*88 > 1，失败/);
+    assert.equal(disputedCheck(turn,'行|极低|不明|失败|工具不合适'),'');
 });
 
 test('one-line model decisions are checked against the real threshold and weighted tickets', () => {
     const rows = [{name:'延续', enabled:true, weight:20}, {name:'变化', enabled:true, weight:10}];
     const turn = {die:58, events:storyPool(rows, 'E', () => 0.3), reactions:storyPool(rows, 'N', () => 0.3)};
     const combat = '战|一般|优势|中性|1|成|角色卡写明对方初学，双方均未受伤';
-    assert.match(confirmVerdict(turn, combat)[0], /对手 1 人.*d100=58 \/ 阈值 65%，成功/);
+    assert.match(confirmVerdict(turn, combat)[0], /对手 1 人.*d100=58，成功阈值 65%，58 ≤ 65，成功/);
     assert.equal(confirmVerdict(turn, combat.replace('|成|', '|败|')), null);
     assert.equal(confirmVerdict(turn, combat.replace('|1|', '|2|')), null);
     assert.equal(confirmVerdict(turn, combat.replace('|成|', '|成|私自新增后果|')), null);
     assert.equal(confirmVerdict(turn, combat.replace('角色卡写明对方初学，双方均未受伤', '失败则对方会离开')), null);
-    assert.match(confirmVerdict(turn, '行|困难|不利|败|工具不足')[0], /阈值 15%，失败/);
+    assert.match(confirmVerdict(turn, '行|困难|不利|败|工具不足')[0], /阈值 15%，58 > 15，失败/);
     assert.match(confirmVerdict(turn, '略|只是寒暄')[0], /无需判定/);
     assert.match(confirmVerdict(turn, '缓|看不清来者')[0], /暂缓判定/);
     const both = confirmVerdict(turn, '事|!E1 +E2|E2|已到交班时间；人|0|N1|有旧约');

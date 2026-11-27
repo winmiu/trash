@@ -34,6 +34,9 @@
 #fair-dice-root .fd-list { margin-inline-start: 8px; }
 #fair-dice-root .fd-list .fd-btn { margin-top: 3px; }
 #fair-dice-root [hidden] { display: none; }
+#fair-dice-root #fd-judge-fields label { display: grid; gap: 3px; margin: 5px 0; font-size: .9em; }
+#fair-dice-root #fd-judge-fields input { width: 100%; min-width: 0; padding: 4px 7px; border: 1px solid var(--fd-line); border-radius: 5px; background: var(--SmartThemeBlurTintColor); color: inherit; }
+#chat .fd-reply-audit { display: block; font-size: .82em; opacity: .8; margin: .4em 0; font-variant-numeric: tabular-nums; }
 #fair-dice-root .fd-rows { display: grid; gap: 7px; }
 #fair-dice-root .fd-row { display: flex; align-items: center; gap: 9px; border: 1px solid var(--fd-line); padding: 8px; border-radius: 9px; }
 #fair-dice-root .fd-muted { opacity: .47; }

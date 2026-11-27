@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { placeInChat, presentIn } from '../delivery.js';
 import { judgeFloor } from '../profile-judge.js';
+import { customJudge, customKey, normalizeAddress, mainJudge } from '../judge-api.js';
 
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url)));
 const entry = new URL('../' + manifest.js, import.meta.url);
@@ -12,7 +13,8 @@ const key = 'char:card.png:one', slot = 'fair_dice_winmiu_injection_v1';
 test('legacy and fresh installations only inject into the host request', async () => {
     for (const legacy of [{autoJudge:true, storyMode:false, refereeApi:'main', compactJudge:true},
         {autoJudge:true, refereeApi:'independent', refereeModel:'fixture', refereeAddress:'https://unused.invalid'},
-        {autoJudge:false, storyMode:false}, {autoJudge:true, storyMode:true}, {}]) {
+        {autoJudge:false, storyMode:false}, {autoJudge:true, storyMode:true},
+        {judgeEnabled:false,judgeRoute:'custom',judgeAddress:'https://unused.invalid/v1',judgeModel:'unused',judgeProfileId:'saved'}, {}]) {
         const url = new URL(entry);
         url.searchParams.set('case', JSON.stringify(legacy));
         const events = new EventEmitter(), requests = [], violations = [];
@@ -53,6 +55,7 @@ test('legacy and fresh installations only inject into the host request', async (
                 events.emit('ended');
                 assert.equal(body.mes,'计分器亮了。');
                 assert.equal(body.swipes[0],body.mes);
+                assert.match(body.extra.fairDiceAudit.text,/成功阈值 50%/);
                 return input;
             }
             const input = hostReply('normal');
@@ -103,6 +106,40 @@ test('legacy and fresh installations only inject into the host request', async (
             assert.deepEqual(violations,[]);
         } finally { globalThis.fetch = previousFetch; }
     }
+});
+
+test('a dedicated API uses only credentials for its current endpoint and account', async () => {
+    const ctx = {extensionSettings:{},getRequestHeaders:()=>({'content-type':'application/json'})};
+    const address = normalizeAddress('https://one.invalid/v1/chat/completions/');
+    customKey(ctx,address,'fixture-one');
+    const sent=[], original=globalThis.fetch;
+    globalThis.fetch=async (path,options)=>{
+        assert.equal(path,'/api/backends/chat-completions/generate');
+        sent.push(JSON.parse(options.body));
+        return {ok:true,json:async()=>({choices:[{message:{content:'略|问好'}}]})};
+    };
+    try {
+        for (const endpoint of [address,'https://two.invalid/v1']) {
+            assert.equal(await customJudge(ctx,{judgeAddress:endpoint,judgeModel:'fixture'},[],new AbortController().signal),'略|问好');
+        }
+        assert.equal(sent[0].proxy_password,'fixture-one');
+        assert.equal(sent[1].proxy_password,'');
+        assert.equal(customKey({extensionSettings:{}},address),'');
+        assert.doesNotMatch(JSON.stringify(ctx.extensionSettings),/fixture-one/);
+        customKey(ctx,address,''); assert.equal(customKey(ctx,address),'');
+    } finally {globalThis.fetch=original;}
+});
+
+test('follow-main uses the current text API and discards a result after cancellation', async () => {
+    const controller=new AbortController(), messages=[{role:'user',content:'fixture'}];
+    let finish;
+    const ctx={mainApi:'textgenerationwebui',generateRaw:({prompt})=>{
+        assert.deepEqual(prompt,messages);return new Promise(resolve=>{finish=resolve;});
+    }};
+    const pending=mainJudge(ctx,messages,controller.signal);
+    controller.abort('judge-off');
+    await assert.rejects(pending,/cancelled/);
+    finish('略|迟到的回复');
 });
 
 test('the budgeted slot becomes one final instruction without changing preset or assistant prefill', () => {
@@ -167,7 +204,8 @@ test('independent profile receives only scene material, returns conditions, and 
 });
 
 test('a custom judge profile cannot use an active Custom key at a different address', async () => {
-    const ctx={ConnectionManagerRequestService:{getSupportedProfiles:()=>[{id:'x',mode:'cc',api:'custom','api-url':'https://judge.invalid/v1'}],
+    const ctx={chat:[],ConnectionManagerRequestService:{getSupportedProfiles:()=>[{id:'x',mode:'cc',api:'custom','api-url':'https://judge.invalid/v1'}],
         sendRequest:()=>assert.fail('wrong destination')},chatCompletionSettings:{custom_url:'https://main.invalid/v1'}};
-    await assert.rejects(judgeFloor(ctx,'x',{},new Set(),new AbortController().signal),/地址不同/);
+    const empty={items:[],order:[]};
+    await assert.rejects(judgeFloor(ctx,{judgeRoute:'profile',judgeProfileId:'x'},{events:empty,reactions:empty},new Set(),new AbortController().signal),/地址不同/);
 });

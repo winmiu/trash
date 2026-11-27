@@ -1,4 +1,4 @@
-import { checkInstructions, checkVerdict } from './scene-check.js';
+import { auditText, checkInstructions, checkVerdict } from './scene-check.js';
 
 // In an exponential race the smallest clock wins with probability w_i / sum(w).
 // Scaling a clock by 1/factor implements the new weight using the same random draw.
@@ -27,7 +27,7 @@ function describe(pool, omittedNotes, judge) {
 }
 
 export function storyPrompt(turn, omittedNotes, judge = false) {
-    if (turn.verdict?.length && !judge) return '【公平骰·本楼裁定】' + turn.verdict.join(' ') + ' 依此接写，后果与格式由主预设决定。';
+    if (turn.verdict?.length && !judge) return '【公平骰·本楼裁定】' + turn.verdict.join(' ') + ' 若说明成败，写出骰点与数值阈值的比较。后果与格式由主预设决定。';
     const lines = [
         '【公平骰】按人设、设定与当前情境判一次：闲聊/既定事实略过；行动看任务门槛及专长工具，交锋按目标比较双方能力、状态和实际人数，无数值用已知表现，依据不足暂缓。只判成败，后果交主预设。',
         judge ? '行难度：很容易/容易/一般/困难/极难/客观不可能。战世界：现实/一般/严格阶位；强弱：明显劣势/劣势/相当/优势/明显优势。临场：不利/中性/有利。' : checkInstructions(turn.die),
@@ -37,10 +37,10 @@ export function storyPrompt(turn, omittedNotes, judge = false) {
     if (turn.events.items.length || turn.reactions.items.length) {
         lines.push((judge ? '事或人|调整|*|事实。' : '每项取[合适/平常/不合适]名次，各组选名次最小者；事或人|调整|选中编号(全排除填0)|事实。') + '调整写+编号/-编号/!编号（加倍/减半/排除），其余原权重，空填0。');
     }
-    const result = judge ? '*' : '成/败';
+    const result = judge ? '*' : '阈值%成或败';
     lines.push('行|难度|不利/中性/有利|' + result + '|事实；战|世界|强弱|临场|对手人数|' + result + '|事实；略或缓|事实。只填适用项，依据一句。');
     lines.push(judge ? '只交裁定行，独立项用分号。不要故事。' :
-        '依预设写正文，附一行 <!--FD-' + turn.token + ' 裁定行 -->，可放末尾。');
+        '说明检定时写“d100点数、成功阈值N%、点数与N的比较、成败”。依预设写故事，附 <!--FD-' + turn.token + ' 裁定行 -->。');
     return lines.join('\n');
 }
 
@@ -103,4 +103,19 @@ export function readRecord(text, token) {
     const before = text.slice(0, start);
     const after = text.slice(end + 3).replace(/^[ \t]*\r?\n/, '');
     return {body:before + after, record:text.slice(start + marker.length, end).trim()};
+}
+
+// A wrong reported threshold can still be audited if the actual check conditions are complete.
+export function disputedCheck(turn, record) {
+    if (typeof record !== 'string' || record.length > 1400) return '';
+    const checks = record.split(/[；;\n]+/).map(row => row.trim().split(/[|｜]/).map(s => s.trim()))
+        .filter(fields => fields[0] === '行' || fields[0] === '战');
+    if (checks.length !== 1) return '';
+    const fields = checks[0];
+    if (fields.length !== (fields[0] === '战' ? 7 : 5)) return '';
+    if (confirmVerdict(turn, fields.join('|'))) return '';
+    fields[fields.length - 2] = '*';
+    const calculated = confirmVerdict(turn,fields.join('|'),true);
+    const summary = calculated && auditText(calculated);
+    return summary ? '按模型所报条件复核：' + summary + ' 模型原裁定未确认。' : '';
 }

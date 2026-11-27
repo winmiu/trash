@@ -2,7 +2,23 @@ import { COMBAT_PROFILES, DIFFICULTY, actionOdds, combatOdds } from './engine.js
 
 const RELATIVE = { '明显劣势':15, '劣势':35, '相当':50, '优势':65, '明显优势':85 };
 const WORLDS = { urban:'现实', neutral:'一般', strict:'严格阶位' };
-const ADJUSTMENTS = [-15, 0, 15];
+export function compareRoll(die, chance) {
+    return 'd100=' + die + '，成功阈值 ' + chance + '%，' + die + (die <= chance ? ' ≤ ' : ' > ') + chance + '，' + (die <= chance ? '成功' : '失败') + '。';
+}
+
+export function auditText(verdict) {
+    for (const line of verdict ?? []) {
+        if (typeof line !== 'string' || !/^(行动|交锋) · /.test(line)) continue;
+        // v2.0 and v2.1 stored the same verified calculation using a slash separator.
+        const m = /d100=(\d{1,3})(?:，成功阈值 | \/ 阈值 )(\d{1,3})%，(?:\d+ [≤>] \d+，)?(成功|失败)。$/.exec(line);
+        if (!m) continue;
+        const die = Number(m[1]), chance = Number(m[2]);
+        if (die >= 1 && die <= 100 && chance <= 100 && (m[3] === '成功') === (die <= chance)) {
+            return line.slice(0,2) + ' · ' + compareRoll(die,chance);
+        }
+    }
+    return '';
+}
 
 export function checkVerdict(fields, die, resolveLocally = false) {
     const [kind, ...args] = fields;
@@ -24,17 +40,14 @@ export function checkVerdict(fields, die, resolveLocally = false) {
         conditions = base;
     }
     const success = die <= chance;
-    if (!(resolveLocally && result === '*') && result !== (success ? '成' : '败')) return null;
-    return (combat ? '交锋' : '行动') + ' · ' + fact + '。' + conditions + '，' + state + '（' + (modifier > 0 ? '+' : '') + modifier + '）。d100=' + die + ' / 阈值 ' + chance + '%，' + (success ? '成功' : '失败') + '。';
+    const label = success ? '成' : '败';
+    const reported = result.replace(/成功$/, '成').replace(/失败$/, '败').replace('％','%').replace(/[\s，,]/g,'');
+    if (!(resolveLocally && reported === '*') && reported !== label && reported !== chance + '%' + label) return null;
+    return (combat ? '交锋' : '行动') + ' · ' + fact + '。' + conditions + '，' + state + '（' + (modifier > 0 ? '+' : '') + modifier + '）。' + compareRoll(die,chance);
 }
 
 export function checkInstructions(die) {
-    // Collapse the entire action table into the hardest success for each situation.
-    const difficulties = Object.entries(DIFFICULTY);
-    const limits = ADJUSTMENTS.map(modifier => {
-        const last = difficulties.filter(([difficulty]) => die <= actionOdds({difficulty, modifier}).probability).at(-1);
-        return last?.[1].name ?? '无';
-    });
-    return 'd100=' + die + '。行：很容易/容易/一般/困难/极难，不利/中性/有利下最多成功到' + limits.join('/') +
-        '；客观不可能必败。战：明显劣势/劣势/相当/优势/明显优势基值15/35/50/65/85，加临场-15/0/15。每多1人按现实/一般/严格阶位扣17/13/19，最多扣75。3/5/10/50人起封顶40/22/7/1，最后限1～99，骰≤阈值成。';
+    const entries = Object.values(DIFFICULTY);
+    return 'd100=' + die + '。行：' + entries.map(d=>d.name).join('/') + '基值' + entries.map(d=>d.base).join('/') +
+        '；战：明显劣势/劣势/相当/优势/明显优势基值15/35/50/65/85，每多1人按现实/一般/严格阶位扣17/13/19，最多扣75。行、战均加临场不利/中性/有利=-15/0/+15；交锋3/5/10/50人起封顶40/22/7/1。最后限1～99%，客观不可能固定0%。骰≤阈值成功，否则失败。';
 }
