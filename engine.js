@@ -30,23 +30,6 @@ export function tierIndex(level) {
     if (n === null) return null;
     return TIERS.findIndex(x => n >= x.min && n <= x.max);
 }
-export function tierName(level) {
-    const idx = tierIndex(level);
-    return idx === null || idx < 0 ? '未知' : TIERS[idx].name;
-}
-export function detectKind(userText = '', assistantText = '') {
-    // Most classifications use the current player's action, not random mentions in a past scene.
-    const text = String(userText).slice(-1300);
-    const support = String(assistantText).slice(-1000);
-    const battle = /(拔剑|挥剑|出拳|出掌|挥刀|开枪|射击|闪避|格挡|冲锋|交手|对打|出手攻击|攻击(他|她|对方|敌人)|发动攻势|被(袭击|打|刺)|偷袭|fight\b|attack\b|strike\b|shoot\b|duel\b|punch\b)/i;
-    const action = /(试图|尝试|能否|可否|试着|想要说服|请求(他|她|对方)|劝说|调查|潜入|偷取|撬开|开锁|追踪|逃脱|避开守卫|谈判|说服|查找线索|破解|欺骗|掩饰|寻找证据|attempt\b|persuade\b|convince\b|sneak\b|escape\b|investigate\b|pick.*lock\b)/i;
-    const negated = /(没有(打架|交手|攻击)|不(攻击|动手)|只是(聊天|看着)|不想打|without fighting|no fighting)/i;
-    if (battle.test(text) && !negated.test(text)) return 'combat';
-    if (action.test(text)) return 'action';
-    // An established ongoing battle can continue on a short next-user choice such as '继续'.
-    if (/^(继续|再来一次|乘胜追击|防守|撤退|反击|继续战斗)[。.!！\s]*$/.test(text.trim()) && battle.test(support)) return 'combat';
-    return 'narrative';
-}
 export function combatOdds({ actorLevel = null, opponentLevel = null, opponentCount = 1, modifier = 0, profile = COMBAT_PROFILES.neutral, relativeBase = null } = {}) {
     const a = parseLevel(actorLevel), b = parseLevel(opponentLevel);
     const knownA = a !== null, knownB = b !== null;
@@ -84,17 +67,4 @@ export function actionOdds({ difficulty = 'normal', modifier = 0, impossible = f
 }
 export function rollD100(random = Math.random) {
     return clamp(Math.floor(random() * 100) + 1, 1, 100);
-}
-export function resolveCheck(probability, dice) {
-    const chance = clamp(Math.round(Number(probability) || 0), 0, 100);
-    const roll = clamp(Math.round(Number(dice) || 1), 1, 100);
-    const success = roll <= chance;
-    let degree = success ? '成功' : '失败';
-    if (success && roll <= 5 && chance >= 5) degree = '显著成功';
-    else if (!success && roll >= 96 && chance <= 95) degree = '严重失利';
-    return { chance, roll, success, degree, margin: chance - roll };
-}
-export function isValidAssessment(obj) {
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
-    return ['combat', 'action', 'narrative', 'none'].includes(obj.kind);
 }

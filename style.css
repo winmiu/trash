@@ -23,9 +23,7 @@
 #fair-dice-root .fd-switch input:checked + span:after { transform: translateX(18px); }
 #fair-dice-root .fd-switch input:disabled + span { opacity: .4; cursor: not-allowed; }
 #fair-dice-root .fd-switch input:focus-visible + span { outline: 2px solid var(--fd-accent); outline-offset: 2px; }
-#fair-dice-root .fd-options { display: flex; flex-wrap: wrap; gap: 7px 15px; padding: 12px 0; }
-#fair-dice-root .fd-options label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-#fair-dice-root .fd-options input, #fair-dice-root .fd-check { accent-color: #ae8657; width: 16px; height: 16px; }
+#fair-dice-root .fd-check { accent-color: #ae8657; width: 16px; height: 16px; }
 #fair-dice-root .fd-presets { display: flex; align-items: center; gap: 14px; margin: 5px 0 10px; }
 #fair-dice-root .fd-presets label { min-width: 65px; }
 #fair-dice-root .fd-presets select { flex: 1; width: auto; min-height: 34px; border-radius: 8px; border: 1px solid var(--fd-line); background: var(--SmartThemeBlurTintColor, #25242c); color: inherit; padding: 3px 8px; }
@@ -35,14 +33,7 @@
 #fair-dice-root .fd-drawer[open] { padding-bottom: 8px; }
 #fair-dice-root .fd-list { margin-inline-start: 8px; }
 #fair-dice-root .fd-list .fd-btn { margin-top: 3px; }
-#fair-dice-root .fd-select { display: flex; align-items: center; gap: 8px; }
-#fair-dice-root .fd-judge select { min-width: 0; max-width: 100%; color: inherit; background: var(--SmartThemeBlurTintColor,#25242c); border: 1px solid var(--fd-line); border-radius: 6px; padding: 4px; }
-#fair-dice-root .fd-select select { flex: 1; }
-#fair-dice-root .fd-select + .fd-select { margin-top: 6px; }
-#fair-dice-root #fd-api-fields { margin-top: 8px; }
-#fair-dice-root #fd-api-fields label { display: grid; gap: 2px; margin-top: 5px; font-size: 12px; }
-#fair-dice-root #fd-api-fields input { width: 100%; min-width: 0; padding: 4px 7px; border: 1px solid var(--fd-line); border-radius: 5px; background: var(--fd-soft); color: inherit; }
-#fair-dice-root .fd-assessment:empty, #fair-dice-root [hidden] { display: none; }
+#fair-dice-root [hidden] { display: none; }
 #fair-dice-root .fd-rows { display: grid; gap: 7px; }
 #fair-dice-root .fd-row { display: flex; align-items: center; gap: 9px; border: 1px solid var(--fd-line); padding: 8px; border-radius: 9px; }
 #fair-dice-root .fd-muted { opacity: .47; }
@@ -57,9 +48,6 @@
 #fair-dice-root .fd-btn:hover { filter: brightness(1.18); border-color: var(--fd-accent); }
 #fair-dice-root .fd-btn:focus-visible { outline: 2px solid var(--fd-accent); outline-offset: 2px; }
 #fair-dice-root .fd-btn.fd-remove { opacity: .65; }
-#fair-dice-root .fd-roll-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-#fair-dice-root .fd-result { font-size: 12px; margin-top: 10px;  padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--fd-line); line-height: 1.55; }
-#fair-dice-root .fd-result-tag { color: var(--fd-accent); display: block; font-size: 10px; margin-bottom: 3px; }
 #fair-dice-root .fd-foot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 10px; padding-top: 9px; }
 #fair-dice-root .fd-foot small { font-size: 11px; line-height: 1.55; }
 #fair-dice-root .fd-foot a { color: inherit; text-underline-offset: 2px; }
@@ -71,19 +59,7 @@
   #fair-dice-root .fd-rowtext { flex: 1 1 calc(100% - 30px); }
   #fair-dice-root .fd-rowcontrols { width: 100%; justify-content: flex-end; padding-left: 20px; }
   #fair-dice-root .fd-presets { align-items: stretch; flex-direction: column; gap: 5px; }
-  #fair-dice-root .fd-options { display: grid; }
 }
-/* v1.1 event/action/combat judgement */
-#fair-dice-root .fd-fields { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin-top:12px; }
-#fair-dice-root .fd-fields label { font-size:11px; opacity:.9; display:grid; gap:3px; min-width:0; }
-#fair-dice-root .fd-fields input { width:100%; }
-#fair-dice-root .fd-assessment { margin:8px 0; padding:8px; font-size:11px; border-left:2px solid var(--fd-accent); background:var(--fd-soft); line-height:1.5; }
-@media (max-width:720px) {
- #fair-dice-root .fd-fields { grid-template-columns:repeat(2,minmax(0,1fr)); }
-}
-
-#fair-dice-root .fd-unknown { display:flex; align-items:center; gap:6px; font-size:11px; margin:10px 0; opacity:.86; }
-#fair-dice-root .fd-unknown input { accent-color:var(--fd-accent); }
 #fair-dice-root .fd-log-status { margin: .6em 0; font-size: .9em; }
 #fair-dice-root .fd-log-list { max-height: 22em; overflow: auto; overflow-wrap: anywhere; }
 #fair-dice-root .fd-log-run { border-top: 1px solid var(--SmartThemeBorderColor, #8888); padding: .55em 0; font-size: .9em; }
