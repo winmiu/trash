@@ -52,6 +52,9 @@ test('legacy and fresh installations only inject into the host request', async (
             const input = hostReply('normal');
             assert.equal(input.length,1);
             assert.match(input[0],/d100=\d+/);
+            for (const rule of ['先找出仍未确定的问题', '行动：', '没有数值就用人设', '事件走向：', 'NPC 反应：', '每轮重评']) {
+                assert.ok(input[0].includes(rule), rule);
+            }
             assert.match(input[0],/后果、严重程度和后续情节全部由主预设/);
             assert.doesNotMatch(input[0],/OLD-CONSEQUENCE|<!--|HTML|JSON|stakes|字段|回执|大败|大成|致命|失败可带来/);
             assert.equal(requests.length,1);
@@ -70,7 +73,7 @@ test('legacy and fresh installations only inject into the host request', async (
             ctx.chatId = 'one';
             cfg.enabledChats[key]=false;
             assert.deepEqual(assemble('normal'),[]);
-            assert.match(JSON.stringify(cfg.runLogs[key]),/已注入正文输入/);
+            assert.match(JSON.stringify(cfg.runLogs[key]),/已注入正文输入 · 判定时机、行动难度、交锋强弱、事件走向、NPC 反应/);
             assert.deepEqual(violations,[]);
         } finally { globalThis.fetch = previousFetch; }
     }

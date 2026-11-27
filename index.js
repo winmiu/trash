@@ -245,7 +245,10 @@ globalThis.FairDiceIndependentInterceptor = function (_chat, _contextSize, _abor
         injectedChat = key;
         ctx.setExtensionPrompt(PROMPT_KEY, prompt, IN_CHAT, EVENT_DEPTH, false, SYSTEM_ROLE,
             () => injectedChat === key && chatKey() === key && isEnabledHere());
-        log('已注入正文输入 · 本机候选 d100=' + turn.die + ' · 公平骰模型请求 0 次。');
+        const rules = ['判定时机', '行动难度', '交锋强弱'];
+        if (turn.events.items.length) rules.push('事件走向');
+        if (turn.reactions.items.length) rules.push('NPC 反应');
+        log('已注入正文输入 · ' + rules.join('、') + '。本机候选 d100=' + turn.die + ' · 公平骰模型请求 0 次。');
     } catch {
         clearInjection();
         log('准备或写入正文输入失败，请检查酒馆版本。', 'error');
@@ -407,7 +410,7 @@ function updateScope() {
     const toggle = root.querySelector('#fd-enabled');
     toggle.disabled = !key;
     toggle.checked = isEnabledHere();
-    root.querySelector('#fd-scope').textContent = key ? '一次性注入正文输入' : '请先打开一个聊天。';
+    root.querySelector('#fd-scope').textContent = key ? '随角色卡和当前剧情判定 · 一次注入正文输入' : '请先打开一个聊天。';
     renderRunLog();
 }
 
@@ -455,7 +458,7 @@ function buildUI() {
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v1.9.0</span> winmiu</small>
+            <small class="fd-signature"><span>v1.9.1</span> winmiu</small>
           </footer>
         </div>
       </details>`;
