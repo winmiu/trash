@@ -29,25 +29,39 @@ function describe(pool, omittedNotes, judge) {
     }).join(' ');
 }
 
-export function storyPrompt(turn, omittedNotes, judge = false) {
-    if (turn.verdict?.length && !judge) {
+const sceneRules = '按人设与当前情境判一次：闲聊/既定事实略过；行、战先定本楼实际尝试的动作和对象，不把动机或后续结果算作目标。行动看任务门槛及专长工具，交锋按目标比较双方能力、状态和实际人数，无数值用已知表现，依据不足暂缓。';
+
+export function judgePrompt(turn, omittedNotes) {
+    const lines = [
+        '【公平骰·独立裁判】' + sceneRules,
+        '你只选条件，扩展负责掷骰和计算。只输出适用的记录，每条单独一行，星号原样保留。格式如下：',
+        '行|难度|临场|*|目标：动作及对象，依据：事实',
+        '战|世界|强弱|临场|对手人数|*|目标：动作及对象，依据：事实',
+        '无需判定用「略|事实」，缺关键依据用「缓|事实」。行与战最多选一种。事实只写一句。',
+        '难度选很容易/容易/一般/困难/极难/客观不可能；世界选现实/一般/严格阶位；强弱选明显劣势/劣势/相当/优势/明显优势；临场选不利/中性/有利；人数填整数。',
+    ];
+    if (turn.events.items.length) lines.push('自然转场可用 事|调整|*|事实。候选：' + describe(turn.events, omittedNotes, true));
+    if (turn.reactions.items.length) lines.push('NPC有未决选择可用 人|调整|*|事实。候选：' + describe(turn.reactions, omittedNotes, true));
+    if (turn.events.items.length || turn.reactions.items.length) lines.push('调整填0或用空格分隔的+编号/-编号/!编号（加倍/减半/排除）。');
+    return lines.join('\n');
+}
+
+export function storyPrompt(turn, omittedNotes) {
+    if (turn.verdict?.length) {
         const verdict = '【公平骰·本楼裁定】' + turn.verdict.join(' ');
         if (!auditText(turn.verdict)) return verdict + ' 依主预设写故事。';
         return verdict + ' ' + floorOutcomeRule + hideCheckDetails;
     }
     const lines = [
-        '【公平骰】按人设与当前情境判一次：闲聊/既定事实略过；行、战先定本楼实际尝试的动作和对象，不把动机或后续结果算作目标。行动看任务门槛及专长工具，交锋按目标比较双方能力、状态和实际人数，无数值用已知表现，依据不足暂缓。',
-        judge ? '行难度：很容易/容易/一般/困难/极难/客观不可能。战世界：现实/一般/严格阶位；强弱：明显劣势/劣势/相当/优势/明显优势。临场：不利/中性/有利。' : checkInstructions(turn.die),
+        '【公平骰】' + sceneRules, checkInstructions(turn.die),
     ];
-    if (turn.events.items.length) lines.push('事：自然转场按时地、未完事务。' + describe(turn.events, omittedNotes, judge));
-    if (turn.reactions.items.length) lines.push('人：未决NPC选择按动机、关系和代价。' + describe(turn.reactions, omittedNotes, judge));
+    if (turn.events.items.length) lines.push('事：自然转场按时地、未完事务。' + describe(turn.events, omittedNotes, false));
+    if (turn.reactions.items.length) lines.push('人：未决NPC选择按动机、关系和代价。' + describe(turn.reactions, omittedNotes, false));
     if (turn.events.items.length || turn.reactions.items.length) {
-        lines.push((judge ? '事或人|调整|*|事实。' : '每项取[合适/平常/不合适]名次，各组选名次最小者；事或人|调整|选中编号(全排除填0)|事实。') + '调整写+编号/-编号/!编号（加倍/减半/排除），其余原权重，空填0。');
+        lines.push('每项取[合适/平常/不合适]名次，各组选名次最小者；事或人|调整|选中编号(全排除填0)|事实。调整写+编号/-编号/!编号（加倍/减半/排除），其余原权重，空填0。');
     }
-    const result = judge ? '*' : '阈值%成或败';
-    lines.push('行|难度|不利/中性/有利|' + result + '|目标：动作及对象，依据：事实；战|世界|强弱|临场|对手人数|' + result + '|目标：动作及对象，依据：事实；略或缓|事实。只填适用项，依据一句。');
-    lines.push(judge ? '只交裁定行，独立项用分号。不要故事。' :
-        floorOutcomeRule + hideCheckDetails + '在回复末尾附隐藏记录 <!--FD-' + turn.token + ' 裁定行 -->。');
+    lines.push('行|难度|不利/中性/有利|阈值%成或败|目标：动作及对象，依据：事实；战|世界|强弱|临场|对手人数|阈值%成或败|目标：动作及对象，依据：事实；略或缓|事实。只填适用项，依据一句。');
+    lines.push(floorOutcomeRule + hideCheckDetails + '在回复末尾附隐藏记录 <!--FD-' + turn.token + ' 裁定行 -->。');
     return lines.join('\n');
 }
 

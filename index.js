@@ -81,6 +81,11 @@ let delivery = null;
 let judgeJob = null;
 const standardNotes = new Set(Object.values(BUILT_INS).flatMap(p => [...p.events, ...p.reactions].map(row => row[2])));
 const generationNames = { normal:'正常生成', regenerate:'重新生成', swipe:'切换候选回复', continue:'继续生成' };
+function modeLabel(cfg) {
+    if (!cfg.judgeEnabled) return '正文同次判定';
+    const name = {main:'跟随主 API', custom:'独立 API', profile:'酒馆连接'}[cfg.judgeRoute] || '未识别的连接';
+    return '独立裁判 · ' + name;
+}
 
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
 function context() {
@@ -361,10 +366,12 @@ globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize,
     finishPending();
     clearInjection();
     const ctx = context(), cfg = initSettings(), key = chatKey();
-    const log = beginRun(cfg, key, generationNames[type] + ' · 一次性注入', () => { persist(); renderRunLog(); });
+    const mode = modeLabel(cfg);
+    const log = beginRun(cfg, key, generationNames[type] + ' · ' + mode, () => { persist(); renderRunLog(); });
     try {
         if (typeof ctx.setExtensionPrompt !== 'function') {
             log('未注入：当前酒馆没有提供提示词接口。', 'error');
+            if (cfg.judgeEnabled) abort(true);
             return;
         }
         const {turn, label, source} = floorTurn(ctx, cfg, key);
@@ -376,20 +383,26 @@ globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize,
             updateRerollButton();
             const timeout = setTimeout(() => controller.abort('timeout'), 60000);
             try {
+                log(mode + '：准备本楼裁判请求，正文等待裁定。');
                 const verdict = await judgeFloor(ctx, cfg, turn, standardNotes, controller.signal);
-                controller.signal.throwIfAborted();
+                if (controller.signal.aborted) throw new Error('裁判请求已取消');
                 if (key !== chatKey() || !isEnabledHere() || currentFloor(ctx,cfg,key).owner[FLOOR_FIELD] !== turn) { abort(true); return; }
                 turn.verdict = verdict;
                 ctx.saveMetadataDebounced?.();
                 judged = true;
+                log('裁判已返回，裁定已通过本机校验。');
             } catch (error) {
                 if (controller.signal.reason === 'judge-off' && !cfg.judgeEnabled && key === chatKey() && isEnabledHere() && currentFloor(ctx,cfg,key).owner[FLOOR_FIELD] === turn) {
                     judgeCancelled = true;
                     log('已关闭独立裁判，本轮由正文同次判定。');
                 } else {
                     if (controller.signal.aborted && controller.signal.reason !== 'timeout') { abort(true); return; }
-                    const detail = error instanceof JudgeConfigError || ['所选酒馆连接不可用','独立裁判的记录未通过骰表校验'].includes(error?.message) || error?.message?.startsWith('此自定义地址') ? error.message : '请检查所选连接和模型';
-                    log('独立裁判' + (controller.signal.reason === 'timeout' ? '超时' : '未完成') + '，本轮正文照常生成，本楼骰点保留。' + detail, 'error');
+                    const known = error instanceof JudgeConfigError || error?.message === '所选酒馆连接不可用' || error?.message?.startsWith('此自定义地址');
+                    let detail = known ? error.message : '连接未完成，请检查所选接口和模型';
+                    if (controller.signal.reason === 'timeout') detail = '等待超过 60 秒';
+                    log(mode + '失败：' + detail + '。本次正文已停止，本楼骰点保留，可重新生成。', 'error');
+                    abort(true);
+                    globalThis.toastr?.warning?.(detail + '。详情见公平骰运行日志。', '独立裁判失败，本次正文已停止');
                     return;
                 }
             } finally {
@@ -409,13 +422,14 @@ globalThis.FairDiceIndependentInterceptor = async function (_chat, _contextSize,
             () => injectedChat === key && chatKey() === key && isEnabledHere());
         updateRerollButton();
         log(label + ' · ' + source + '第 ' + turn.revision + ' 组 · d100=' + turn.die + '。');
-        const via = judged ? ({main:'跟随主 API',custom:'独立 API',profile:'酒馆连接'})[cfg.judgeRoute] + ' · ' : '';
-        const requests = judgeCancelled ? '之前启动的裁判已取消。' : via + '公平骰模型请求 ' + (judged ? 1 : 0) + ' 次。';
+        const reused = turn.verdict && !judged ? '沿用本楼已确认裁定。' : '';
+        const requests = judgeCancelled ? '之前启动的裁判已取消。' : reused + '公平骰模型请求 ' + (judged ? 1 : 0) + ' 次。';
         log((turn.verdict ? '已准备本楼已确认裁定。' : '已准备同次裁定。') + prompt.length + ' 字符，' + requests, 'info', prompt);
         if (turn.verdict) for (const line of turn.verdict) log(line);
     } catch {
         finishPending();
         clearInjection();
+        if (cfg.judgeEnabled) abort(true);
         log('准备或写入正文输入失败，请检查酒馆版本。', 'error');
     }
 };
@@ -566,7 +580,7 @@ function renderRunLog() {
     if (!key || !cfg) { status.textContent = '扩展已加载。打开角色聊天后可查看该聊天的记录。'; return; }
     const history = cfg.runLogs?.[key];
     const enabled = extensionActive && cfg.enabledChats[key];
-    status.textContent = enabled ? '当前聊天已启用 · 仅注入正文输入' : '当前聊天已关闭';
+    status.textContent = enabled ? '当前聊天已启用 · ' + modeLabel(cfg) : '当前聊天已关闭';
     if (!Array.isArray(history) || !history.length) {
         list.append(el('p', '', enabled ? '尚无运行记录，等待下一次酒馆生成。' : '尚无运行记录。启用当前聊天后开始记录自动判定。'));
         return;
@@ -603,7 +617,7 @@ function updateScope() {
     toggle.checked = isEnabledHere();
     updateRerollButton();
     renderJudgeControls();
-    root.querySelector('#fd-scope').textContent = key ? '随角色卡和当前剧情判定 · 一次注入正文输入' : '请先打开一个聊天。';
+    root.querySelector('#fd-scope').textContent = key ? '随角色卡和当前剧情判定 · ' + modeLabel(initSettings()) : '请先打开一个聊天。';
     renderRunLog();
 }
 
@@ -689,7 +703,7 @@ function buildUI() {
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v2.3.0</span> winmiu</small>
+            <small class="fd-signature"><span>v2.3.1</span> winmiu</small>
           </footer>
         </div>
       </details>`;
@@ -706,17 +720,18 @@ function buildUI() {
     root.querySelector('#fd-judge-on').addEventListener('change', e => {
         initSettings().judgeEnabled = e.target.checked;
         if (!e.target.checked) judgeJob?.abort('judge-off');
-        persist(); renderJudgeControls();
+        persist(); updateScope();
     });
     root.querySelector('#fd-judge-profile').addEventListener('change', e => {
         judgeJob?.abort();
         const cfg = initSettings(), value = e.target.value;
         cfg.judgeRoute = value.startsWith('profile:') ? 'profile' : value;
         if (cfg.judgeRoute === 'profile') cfg.judgeProfileId = value.slice(8);
-        persist(); renderJudgeControls();
+        persist(); updateScope();
     });
     for (const [id, field] of [['#fd-judge-address','judgeAddress'],['#fd-judge-model','judgeModel']]) {
         root.querySelector(id).addEventListener('change', e => {
+            if (initSettings().judgeRoute === 'custom') judgeJob?.abort();
             initSettings()[field] = e.target.value.trim();
             if (field === 'judgeAddress') root.querySelector('#fd-judge-key').value = '';
             root.querySelector('#fd-key-status').textContent = '';
@@ -726,6 +741,7 @@ function buildUI() {
     root.querySelector('#fd-judge-key').addEventListener('change', e => {
         const status = root.querySelector('#fd-key-status');
         try {
+            if (initSettings().judgeRoute === 'custom') judgeJob?.abort();
             customKey(context(),normalizeAddress(initSettings().judgeAddress),e.target.value.trim());
             status.textContent = e.target.value.trim() ? '当前标签页已保存。' : '已清除。';
         } catch { status.textContent = '请先填写有效的接口地址，再输入密钥。'; e.target.value = ''; }

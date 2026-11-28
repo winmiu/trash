@@ -148,6 +148,88 @@ test('follow-main uses the current text API and discards a result after cancella
     finish('略|迟到的回复');
 });
 
+test('a dedicated judge validates final text parts and does not accept hidden reasoning, truncated or malformed results', async () => {
+    const ctx={chat:[{is_user:true,mes:'我修计分器。'}],extensionSettings:{},getRequestHeaders:()=>({})};
+    const pool={items:[],order:[]}, turn={events:pool,reactions:pool,die:50};
+    const cfg={judgeRoute:'custom',judgeAddress:'https://dice.invalid/v1/chat/completions',judgeModel:'gpt-5-mini'};
+    const line='行|一般|中性|*|目标：修好计分器，依据：已有工具';
+    const fenced=['```text',line,'```'].join('\n');
+    const original=globalThis.fetch;
+    try {
+        let reply;
+        globalThis.fetch=async (path,options)=>{
+            const wire=JSON.parse(options.body);
+            assert.equal(path,'/api/backends/chat-completions/generate');
+            assert.equal(wire.reverse_proxy,'https://dice.invalid/v1');
+            assert.equal(wire.max_completion_tokens,1024);
+            assert.equal(wire.max_tokens,undefined);
+            assert.match(wire.messages[0].content,/【公平骰·独立裁判】/);
+            assert.doesNotMatch(wire.messages[0].content,/d100=|<!--FD-|依主预设/);
+            return Response.json(reply);
+        };
+        const judge=()=>judgeFloor(ctx,cfg,turn,new Set(),new AbortController().signal);
+        for (const content of [line, fenced, '<think>忽略</think>\n'+fenced,
+            [{type:'reasoning',text:'略|无效'}, {type:'text',text:line.slice(0,8)}, {type:'text',text:line.slice(8)}]]) {
+            reply={choices:[{message:{content}}]};
+            assert.match((await judge())[0],/目标：修好计分器.*50 ≤ 50，成功/);
+        }
+        for (const [response,error] of [
+            [{choices:[{finish_reason:'length',message:{content:line}}]},/长度上限/],
+            [{error:{message:'Unauthorized'}},/鉴权/],
+            [{choices:[{message:{content:null,reasoning_content:line}}]},/没有最终裁定/],
+            [{choices:[{message:{content:'叙述一段故事'}}]},/栏位未通过校验/],
+        ]) {
+            reply=response;
+            await assert.rejects(judge(),error);
+        }
+    } finally {globalThis.fetch=original;}
+});
+
+test('a failed custom judge stops narration; retry keeps the floor and only sends its confirmed result to the story', async () => {
+    const events=new EventEmitter(),cfg={judgeEnabled:true,judgeRoute:'custom',judgeAddress:'https://dice.invalid/v1',judgeModel:'fast',enabledChats:{[key]:true}};
+    const ctx={chatId:'one',characterId:0,characters:[{avatar:'card.png'}],chat:[{is_user:true,mes:'修表'}],
+        extensionSettings:{fair_dice_winmiu_v1:cfg},extensionPrompts:{},eventTypes:{GENERATION_ENDED:'end'},eventSource:events,
+        getRequestHeaders:()=>({}),setExtensionPrompt(id,value){this.extensionPrompts[id]={value};}};
+    const url=new URL(entry);url.searchParams.set('case','custom-retry');
+    globalThis.document=Object.assign(new EventTarget(),{readyState:'loading',scripts:[{src:url.href}]});
+    globalThis.SillyTavern={getContext:()=>ctx};
+    await import(url.href);
+    const original=globalThis.fetch;
+    let calls=0, stories=0;
+    globalThis.fetch=async (_url,{signal})=>{
+        // Some mobile browsers provide AbortSignal without throwIfAborted().
+        Object.defineProperty(signal,'throwIfAborted',{value:undefined});
+        calls++;
+        if (calls===1) return Response.json({error:{message:'Unauthorized'}});
+        return Response.json({choices:[{message:{content:[{type:'text',text:'行|一般|中性|*|修表工具齐全'}]}}]});
+    };
+    async function generate(type){
+        let stopped=false;
+        await globalThis[manifest.generate_interceptor]([],8192,()=>{stopped=true;},type);
+        if (stopped) return '';
+        stories++;
+        const prompt=ctx.extensionPrompts[slot].value;
+        events.emit('end');
+        return prompt;
+    }
+    try {
+        assert.equal(await generate('normal'),'');
+        const floor=ctx.chat[0].extra.fairDiceFloorV2,die=floor.die;
+        assert.equal(floor.verdict,undefined);
+        assert.deepEqual(ctx.extensionPrompts,{});
+        assert.equal(stories,0);
+        assert.match(cfg.runLogs[key][0].title,/独立裁判 · 独立 API/);
+        assert.match(JSON.stringify(cfg.runLogs[key][0].steps),/鉴权失败/);
+        const result=await generate('regenerate');
+        assert.match(result,/本楼裁定.*修表工具齐全/);
+        assert.doesNotMatch(result,/<!--FD-|【公平骰·独立裁判】/);
+        assert.equal(await generate('continue'),result);
+        assert.equal(floor.die,die);
+        assert.deepEqual([calls,stories],[2,2]);
+        assert.match(JSON.stringify(cfg.runLogs[key][0].steps),/沿用本楼已确认裁定/);
+    } finally {globalThis.fetch=original;}
+});
+
 test('the budgeted slot becomes one final instruction without changing preset or assistant prefill', () => {
     const text='【公平骰】本楼交锋失败。', slot='[fd:abc]'+text+'[/fd:abc]';
     const prefill=Object.freeze({role:'assistant',content:'故事开场。'});
@@ -176,7 +258,7 @@ test('independent profile receives only scene material, returns conditions, and 
     ctx.ConnectionManagerRequestService={
         getSupportedProfiles:()=>[{id:profileId,mode:'cc',api:'openai'}],
         async sendRequest(id,messages,limit,options){
-            assert.equal(id,profileId); assert.equal(options.includePreset,false); assert.equal(limit,256);
+            assert.equal(id,profileId); assert.equal(options.includePreset,false); assert.equal(limit,1024);
             assert.match(messages[1].content,/维修工/); assert.match(messages[1].content,/计分器/);
             assert.doesNotMatch(messages[0].content,/d100=|<!--FD/);
             assert.match(messages[0].content,/目标：动作及对象，依据：事实/);
