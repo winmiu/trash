@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "winmiu",
-  "version": "2.2.2",
+  "version": "2.3.0",
   "generate_interceptor": "FairDiceIndependentInterceptor",
   "hooks": {
     "activate": "onActivate",

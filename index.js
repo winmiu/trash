@@ -5,6 +5,7 @@ import { placeInChat, presentIn } from './delivery.js';
 import { judgeFloor, supportedProfiles } from './profile-judge.js';
 import { customKey, normalizeAddress, JudgeConfigError } from './judge-api.js';
 import { saveAudit, stringHash } from './reply-audit.js';
+import { createFloatingEntry, launcherVisible, saveLauncherVisible } from './floating-entry.js';
 
 const MODULE_KEY = 'fair_dice_winmiu_v1';
 const PROMPT_KEY = 'fair_dice_winmiu_injection_v1';
@@ -70,6 +71,7 @@ const BUILT_INS = Object.freeze({
 
 
 let root = null;
+let entry = null;
 let extensionActive = true;
 let activationRegistered = false;
 let normalizedReference = null;
@@ -592,6 +594,9 @@ function renderRunLog() {
 
 function updateScope() {
     if (!root) return;
+    const visible = launcherVisible(initSettings());
+    root.querySelector('#fd-show-launcher').checked = visible;
+    if (entry) entry.button.hidden = !extensionActive || !visible;
     const key = chatKey();
     const toggle = root.querySelector('#fd-enabled');
     toggle.disabled = !key;
@@ -650,8 +655,6 @@ function buildUI() {
         root = document.getElementById('fair-dice-root');
         return;
     }
-    const host = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
-    if (!host) { console.warn('[Fair Dice] Extensions settings host missing'); return; }
     root = el('section', 'fd-root'); root.id = 'fair-dice-root';
     root.innerHTML = `
       <details class="fd-shell">
@@ -662,6 +665,7 @@ function buildUI() {
             <label class="fd-switch"><input id="fd-enabled" type="checkbox" aria-labelledby="fd-enable-label" /><span></span></label>
           </div>
 
+          <label class="fd-launcher-choice"><input id="fd-show-launcher" type="checkbox"> 显示 Miku 悬浮球</label>
           <details class="fd-drawer" id="fd-log"><summary>运行日志</summary><div class="fd-log-status"></div><button id="fd-reroll" class="fd-btn" type="button">重新摇骰子</button><p class="fd-help">只重掷本楼。可先删除 AI 回复，保留玩家消息，再重掷并生成。</p><div class="fd-log-list"></div></details>
 
           <details class="fd-drawer" id="fd-connection"><summary>独立裁判</summary>
@@ -685,12 +689,17 @@ function buildUI() {
           </details>
           <footer class="fd-foot">
             <small>借鉴名单 · <a href="https://github.com/khangdh0202/SillyTavern-DiceWeaver" target="_blank" rel="noopener noreferrer">DiceWeaver</a>、<a href="https://github.com/brucestarkallen/SillyTavern-Arbiter-Fight-and-Battle" target="_blank" rel="noopener noreferrer">SillyTavern Arbiter</a></small>
-            <small class="fd-signature"><span>v2.2.2</span> winmiu</small>
+            <small class="fd-signature"><span>v2.3.0</span> winmiu</small>
           </footer>
         </div>
       </details>`;
 
-    host.append(root);
+    entry = createFloatingEntry(root, updateScope);
+    root.querySelector('#fd-show-launcher').addEventListener('change', e => {
+        saveLauncherVisible(initSettings(), e.target.checked);
+        persist();
+        updateScope();
+    });
     root.querySelector('#fd-log').addEventListener('toggle', renderRunLog);
     root.querySelector('#fd-reroll').addEventListener('click', rerollFloor);
     root.querySelector('#fd-connection').addEventListener('toggle', e => { if (e.target.open) updateScope(); });
@@ -735,8 +744,7 @@ function buildUI() {
 }
 
 function init() {
-    if (!context()) return;
-    initSettings();
+    if (!extensionActive || !document.body || !initSettings()) return;
     if (!root) buildUI();
     updateScope();
 }
@@ -746,6 +754,17 @@ export function onActivate() {
     if (activationRegistered || !ctx?.eventSource?.on) return;
     activationRegistered = true;
     const types = ctx.eventTypes || ctx.event_types || {};
+    const openSettings = () => {
+        if (extensionActive) { init(); entry?.open(); }
+        return '';
+    };
+    if (ctx.SlashCommandParser?.addCommandObject && ctx.SlashCommand?.fromProps) {
+        ctx.SlashCommandParser.addCommandObject(ctx.SlashCommand.fromProps({
+            name:'fairdice', callback:openSettings, helpString:'打开公平骰功能面板，可恢复 Miku 悬浮球。',
+        }));
+    } else if (ctx.registerSlashCommand) {
+        ctx.registerSlashCommand('fairdice', openSettings, [], '打开公平骰设置', true, true);
+    }
     if (types.GENERATE_AFTER_DATA) ctx.eventSource.on(types.GENERATE_AFTER_DATA, afterData);
     if (types.CHAT_COMPLETION_SETTINGS_READY) ctx.eventSource.on(types.CHAT_COMPLETION_SETTINGS_READY, checkOutgoing);
     if (types.MESSAGE_RECEIVED) ctx.eventSource.on(types.MESSAGE_RECEIVED, receiveVerdict);
@@ -757,12 +776,30 @@ export function onActivate() {
     });
     if (types.CHAT_CHANGED) ctx.eventSource.on(types.CHAT_CHANGED,chatChanged);
     if (types.CHAT_CREATED) ctx.eventSource.on(types.CHAT_CREATED,chatChanged);
-    if (types.SETTINGS_UPDATED) ctx.eventSource.on(types.SETTINGS_UPDATED,() => { renderRows(); updateScope(); });
+    if (types.SETTINGS_UPDATED) ctx.eventSource.on(types.SETTINGS_UPDATED,() => { init(); renderRows(); });
     if (types.APP_READY) ctx.eventSource.on(types.APP_READY,init);
     if (document.readyState !== 'loading') init();
     else document.addEventListener('DOMContentLoaded', init, {once:true});
 }
-export function onEnable() { extensionActive = true; init(); }
-export function onDisable() { extensionActive = false; judgeJob?.abort(); finishPending(); clearInjection(); updateScope(); }
+export function onEnable() { extensionActive = true; onActivate(); init(); }
+export function onDisable() {
+    extensionActive = false;
+    if (entry?.dialog.open) entry.dialog.close();
+    judgeJob?.abort(); finishPending(); clearInjection(); updateScope();
+}
 
-if (typeof document !== 'undefined' && Array.from(document.scripts).some(s => s.src === import.meta.url)) onActivate();
+if (typeof document !== 'undefined') {
+    const modulePath = import.meta.url.split(/[?#]/)[0];
+    const installed = new URL(modulePath).pathname.match(/\/scripts\/extensions\/(third-party\/[^/]+)\/[^/]+$/);
+    const scriptLoaded = Array.from(document.scripts).some(script => script.src.split(/[?#]/)[0] === modulePath);
+    if (scriptLoaded || installed) {
+        // A direct module import has no corresponding script element. Respect the host's disable list.
+        const start = () => {
+            if (!extensionActive || (installed && context()?.extensionSettings?.disabledExtensions?.includes(decodeURIComponent(installed[1])))) return;
+            onActivate();
+        };
+        start();
+        if (!activationRegistered && document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once:true});
+        if (!activationRegistered && document.readyState !== 'complete') globalThis.addEventListener('load', start, {once:true});
+    }
+}

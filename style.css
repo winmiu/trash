@@ -72,3 +72,29 @@
 #fair-dice-root .fd-log-input pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: .4em 0; user-select: text; }
 #fair-dice-root #fd-reroll:disabled { opacity: .5; cursor: default; }
 #fair-dice-root .fd-log-error { font-weight: 650; border-inline-start: .2em solid #cf6b55; padding-inline-start: .5em; }
+
+#fd-miku-launcher {
+  --fd-size: 54px;
+  position: fixed; z-index: 3010; right: max(12px, env(safe-area-inset-right));
+  bottom: max(18vh, calc(80px + env(safe-area-inset-bottom))); width: var(--fd-size); height: var(--fd-size);
+  padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: grab;
+  touch-action: none; user-select: none; filter: drop-shadow(0 2px 3px #10152377);
+}
+#fd-miku-launcher[hidden] { display: none !important; }
+#fd-miku-launcher img { display: block; width: 100%; height: 100%; image-rendering: pixelated; pointer-events: none; }
+#fd-miku-launcher:active { cursor: grabbing; }
+#fd-miku-launcher:focus-visible { outline: 2px solid #5ce3d8; outline-offset: 3px; }
+#fd-settings-dialog {
+  width: min(420px, calc(100vw - 24px)); max-height: 80vh; max-height: 80dvh; margin: auto; padding: 0;
+  overflow: auto; border: 1px solid var(--SmartThemeBorderColor, #767079); border-radius: 12px;
+  background: var(--SmartThemeBlurTintColor, #24252c); color: var(--SmartThemeBodyColor, #eee);
+  box-shadow: 0 10px 40px #18151d55; overscroll-behavior: contain;
+}
+#fd-settings-dialog:not([open]) { display: none; }
+#fd-settings-dialog::backdrop { background: #10101866; }
+#fd-settings-dialog > header { position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; background: var(--SmartThemeBlurTintColor, #24252c); backdrop-filter: blur(12px); }
+#fd-settings-dialog > header button { color: inherit; font: inherit; font-size: 1.45em; border: 0; border-radius: 5px; background: transparent; min-width: 36px; min-height: 36px; cursor: pointer; }
+#fd-settings-dialog #fair-dice-root { margin: 0; }
+#fd-settings-dialog .fd-shell { border: 0; }
+#fd-settings-dialog .fd-title { display: none; }
+#fair-dice-root .fd-launcher-choice { display: flex; align-items: center; gap: 6px; margin: 8px 2px; cursor: pointer; }
